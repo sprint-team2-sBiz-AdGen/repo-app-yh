@@ -8,6 +8,14 @@ from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, 
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
+# Prometheus Client
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from fastapi import Response
+
+# 메트릭 수집 및 처리
+import time
+from fastapi import Request
+
 ASSETS_DIR = os.getenv("ASSETS_DIR", "/var/www/assets")
 PART_NAME = os.getenv("PART_NAME", "yh")  # 파트 이름 (ye, yh, js, sh)
 PORT = int(os.getenv("PORT", "8011"))
@@ -255,6 +263,48 @@ def get_overlay_layout(overlay_id: str, db: Session = Depends(get_db)):
         "created_at": layout.created_at.isoformat() if layout.created_at else None,
         "updated_at": layout.updated_at.isoformat() if layout.updated_at else None
     }
+
+# 메트릭 정의
+http_requests_total = Counter(
+    'http_requests_total',
+    'Total HTTP requests',
+    ['method', 'endpoint', 'status']
+)
+
+http_request_duration_seconds = Histogram(
+    'http_request_duration_seconds',
+    'HTTP request duration',
+    ['method', 'endpoint']
+)
+# /metrics 엔드포인트 추가
+@app.get("/metrics")
+def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    
+# 메트릭 미들웨어
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    # /metrics 엔드포인트는 메트릭 수집에서 제외 (자기 자신의 메트릭 수집 방지)
+    if request.url.path == "/metrics":
+        return await call_next(request)
+    
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    
+    http_requests_total.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code
+    ).inc()
+    
+    http_request_duration_seconds.labels(
+        method=request.method,
+        endpoint=request.url.path
+    ).observe(duration)
+    
+    return response
+
 
 if __name__ == "__main__":
     import uvicorn
