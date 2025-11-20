@@ -15,7 +15,8 @@ def compare_ad_copies():
     image_path = "/opt/feedlyai/assets/yh/image_to_use/20251119-111402-976662c1_pbg_customer_review_ugc_engagement.png"
     
     ad_copy_good = "Spicy Pork Kimchi Stew – one spoon and you'll forget everything else."
-    ad_copy_bad = "The ultimate choice for people who hate spicy food: our extra-.spicy Pork Kimchi Stew"
+    ad_copy_bad = "The ultimate choice for people who hate spicy food: our extra-.pasta"
+    #ad_copy_bad = "Cool down this summer with our refreshing Pork Kimchi Stew ice cream!"
     
     print("=" * 80)
     print("광고 문구 비교 테스트")

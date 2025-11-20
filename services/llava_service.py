@@ -140,8 +140,11 @@ def process_image_with_llava(
     image: Image.Image,
     prompt: str,
     max_new_tokens: int = 512,
-    temperature: float = 0.7,
-    do_sample: bool = True
+
+    # temperature 조절
+    temperature: float = 0.1,
+    # 샘플링 사용 여부
+    do_sample: bool = False
 ) -> str:
     """
     LLaVa를 사용하여 이미지와 프롬프트를 처리하고 응답 생성
@@ -222,31 +225,47 @@ def validate_image_and_text(
     Returns:
         검증 결과 딕셔너리
     """
-    if validation_prompt is None:
-        validation_prompt = """You are evaluating whether an ad copy text matches an advertisement image. Your goal is to determine if they are compatible, and if not, identify what needs to be fixed in the ad copy. Evaluate if the ad copy matches the image. Check compatibility and identify issues.
+    # Step 1: 이미지만 먼저 분석 (광고 문구의 영향을 받지 않도록)
+    image_analysis_prompt = """Analyze this image ONLY. Do NOT consider any ad copy text. Focus solely on what you see in the image.
 
-
-## 1. Image Analysis
-- Product shown: [exact name: e.g., "kimchi stew", "pasta"]
-- Characteristics: [spicy/mild, color, ingredients]
+## Image Analysis (IMPORTANT: Analyze ONLY the image, ignore any text that might be mentioned)
+- Product shown: [What food/product is actually visible? Be specific: e.g., "kimchi stew", "pasta", "burger", "ice cream"]
+- Product type: [Extract the main product type: "stew", "pasta", "burger", "ice cream", "soup", "salad", etc.]
+- Characteristics: [spicy/mild, color, ingredients visible]
 - Setting: [home/restaurant/office/etc.]
-- Mood: [cozy/formal/casual/etc.]"""
+- Mood: [cozy/formal/casual/etc.]
+
+Be very precise about the product type. If you see a stew, write "stew". If you see ice cream, write "ice cream". Do not confuse them."""
     
-    if ad_copy_text:
-        validation_prompt += f"""
+    # 이미지만 먼저 분석
+    image_analysis = process_image_with_llava(image, image_analysis_prompt)
+    
+    if validation_prompt is None:
+        # Step 2: 광고 문구와 비교
+        if ad_copy_text:
+            validation_prompt = f"""You are evaluating whether an ad copy text matches an advertisement image. 
+
+## 1. Image Analysis (Already completed - DO NOT re-analyze)
+{image_analysis}
 
 ## 2. Ad Copy Analysis
 Ad copy: "{ad_copy_text}"
 - Product mentioned: [exact name from ad]
+- Product type: [Extract the main product type from ad: "stew", "pasta", "burger", "ice cream", "soup", "salad", etc.]
 - Characteristics: [spicy/mild/etc. from ad]
 - Target audience: [ONLY extract if explicitly mentioned. Look for "for people who...", "for [group]", "target audience". If NOT mentioned, write "none". Examples: "for people who hate spicy" = "people who hate spicy", "for spicy lovers" = "spicy lovers", no mention = "none"]
 - Message: [main point]
 
 ## 3. Compatibility Check
-STEP 1: Product match
-- Image: [product from section 1]
-- Ad: [product from section 2]
-- Match? [Yes/No - "stew" = "stew" = Yes, "stew" ≠ "pasta" = No]
+STEP 1: Product type match (CRITICAL)
+Compare the product TYPES from section 1 and section 2:
+- Image product type: [from section 1 - extract "stew", "pasta", "ice cream", etc.]
+- Ad product type: [from section 2 - extract "stew", "pasta", "ice cream", etc.]
+- Match? [Yes/No - "stew" = "stew" = Yes, but "stew" ≠ "ice cream" = No, "stew" ≠ "pasta" = No]
+
+CRITICAL: If image shows "stew" but ad says "ice cream" → Product Match = No
+If image shows "pasta" but ad says "stew" → Product Match = No
+Only match if the product TYPE is the same.
 
 STEP 2: Logical consistency (CRITICAL)
 Check if target audience conflicts with product characteristics:
@@ -269,18 +288,24 @@ Mismatch Details: [List issues or "None"]
 Overall Assessment: [Suitable/Not Suitable]
 Reasoning: [Brief explanation]
 
+CRITICAL SCORING RULES (MUST FOLLOW):
+- If Product/Food Match = No (e.g., "stew" ≠ "ice cream", "pasta" ≠ "stew") → Match Score MUST be 0-3/10, Mismatch Detected = Yes, Not Suitable
+- If Logical Consistency = No (e.g., "hate spicy" + "spicy product") → Match Score MUST be 0-3/10, Mismatch Detected = Yes, Not Suitable
+- If Mismatch Detected = Yes → Match Score MUST be 0-3/10, Not Suitable
+- If Product/Food Match = Yes AND Logical Consistency = Yes AND Mismatch Detected = No → Match Score can be 7-10/10, Suitable
+- Examples of Product mismatch: "stew" ≠ "ice cream", "pasta" ≠ "burger", "soup" ≠ "salad"
+- Examples of Logical mismatch: "hate spicy" + "spicy", "mild" + "extra spicy"
+
 RULES:
 - If Logical Consistency = No → Mismatch Detected = Yes, Overall Assessment = Not Suitable, Match Score = 0-3/10
-- If "hate spicy" + "spicy product" → Logical Consistency = No, Mismatch Detected = Yes, Not Suitable
-- If product names differ → Product Match = No, Mismatch Detected = Yes, Not Suitable
+- If "hate spicy" + "spicy product" → Logical Consistency = No, Mismatch Detected = Yes, Not Suitable, Match Score = 0-3/10
+- If product types differ (e.g., "stew" vs "ice cream") → Product Match = No, Mismatch Detected = Yes, Not Suitable, Match Score = 0-3/10
 - If target audience = "none" → Logical Consistency = Yes (no contradiction to check)
-- Any contradiction or mismatch → Not Suitable"""
-    else:
-        validation_prompt += """
-3. Provide general recommendations for advertising use.
-
-Provide your analysis."""
+- Any contradiction or mismatch → Not Suitable, Match Score = 0-3/10"""
+        else:
+            validation_prompt = image_analysis_prompt + "\n\n3. Provide general recommendations for advertising use.\n\nProvide your analysis."
     
+    # Step 2: 광고 문구와 비교 (이미지 분석 결과 포함)
     response = process_image_with_llava(image, validation_prompt)
     
     # 응답 파싱 - 개선된 로직
@@ -369,11 +394,28 @@ Provide your analysis."""
         else:
             relevance_score = 0.5
     
+    # 점수 조정: 명확한 불일치가 있으면 강제로 낮은 점수 부여
+    # LLaVa가 높은 점수를 줘도 불일치가 있으면 낮춤
+    max_score_for_mismatch = 0.3
+    
+    if product_match is False:
+        # 제품명 불일치 (예: "stew" vs "ice cream") → 최대 0.3
+        relevance_score = min(relevance_score, max_score_for_mismatch)
+    elif logical_consistency is False:
+        # 논리적 모순 (예: "hate spicy" + "spicy product") → 최대 0.3
+        relevance_score = min(relevance_score, max_score_for_mismatch)
+    elif has_mismatch:
+        # 기타 불일치 감지 → 최대 0.3
+        relevance_score = min(relevance_score, max_score_for_mismatch)
+    
     # 적합성 판단 (구조화된 형식 우선)
     is_valid = None
     overall_assessment_match = re.search(r'overall\s+assessment[:\s]+(suitable|not\s+suitable)', response_lower)
     if overall_assessment_match:
         is_valid = overall_assessment_match.group(1).lower().replace(" ", "") == "suitable"
+        # Overall Assessment가 Suitable여도 불일치가 있으면 False로 변경
+        if is_valid and (product_match is False or logical_consistency is False or has_mismatch):
+            is_valid = False
     else:
         # Logical Consistency가 No이면 자동으로 Not Suitable (최우선)
         if logical_consistency is False:
