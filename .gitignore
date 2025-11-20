@@ -14,3 +14,10 @@ build/
 .vscode/
 *.log
 
+model/
+docs/
+
+# Python package marker files
+__init__.py
+# Ignore all __init__.py in any subfolder
+**/__init__.py

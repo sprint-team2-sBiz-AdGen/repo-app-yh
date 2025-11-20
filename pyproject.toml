@@ -13,6 +13,11 @@ dependencies = [
     "sqlalchemy==2.0.23",
     "psycopg2-binary==2.9.9",
     "prometheus-client==0.19.0",
+    # LLaVa 모델 관련
+    "transformers>=4.37.0",
+    "torch>=2.0.0",
+    "accelerate>=0.25.0",
+    "bitsandbytes>=0.41.0",  # 8-bit 양자화 지원 (선택사항, 메모리 절약)
 ]
 
 [build-system]
