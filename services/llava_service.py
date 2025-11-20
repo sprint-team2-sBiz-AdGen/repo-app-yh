@@ -229,13 +229,12 @@ def validate_image_and_text(
     image_analysis_prompt = """Analyze this image ONLY. Do NOT consider any ad copy text. Focus solely on what you see in the image.
 
 ## Image Analysis (IMPORTANT: Analyze ONLY the image, ignore any text that might be mentioned)
-- Product shown: [What food/product is actually visible? Be specific: e.g., "kimchi stew", "pasta", "burger", "ice cream"]
-- Product type: [Extract the main product type: "stew", "pasta", "burger", "ice cream", "soup", "salad", etc.]
-- Characteristics: [spicy/mild, color, ingredients visible]
+- Product shown: [What food/product is actually visible? Be specific with the exact name]
+- Characteristics: [spicy/mild, color, ingredients visible, texture, etc.]
 - Setting: [home/restaurant/office/etc.]
 - Mood: [cozy/formal/casual/etc.]
 
-Be very precise about the product type. If you see a stew, write "stew". If you see ice cream, write "ice cream". Do not confuse them."""
+Focus on the product characteristics and visual elements."""
     
     # 이미지만 먼저 분석
     image_analysis = process_image_with_llava(image, image_analysis_prompt)
@@ -251,23 +250,12 @@ Be very precise about the product type. If you see a stew, write "stew". If you 
 ## 2. Ad Copy Analysis
 Ad copy: "{ad_copy_text}"
 - Product mentioned: [exact name from ad]
-- Product type: [Extract the main product type from ad: "stew", "pasta", "burger", "ice cream", "soup", "salad", etc.]
 - Characteristics: [spicy/mild/etc. from ad]
 - Target audience: [ONLY extract if explicitly mentioned. Look for "for people who...", "for [group]", "target audience". If NOT mentioned, write "none". Examples: "for people who hate spicy" = "people who hate spicy", "for spicy lovers" = "spicy lovers", no mention = "none"]
 - Message: [main point]
 
 ## 3. Compatibility Check
-STEP 1: Product type match (CRITICAL)
-Compare the product TYPES from section 1 and section 2:
-- Image product type: [from section 1 - extract "stew", "pasta", "ice cream", etc.]
-- Ad product type: [from section 2 - extract "stew", "pasta", "ice cream", etc.]
-- Match? [Yes/No - "stew" = "stew" = Yes, but "stew" ≠ "ice cream" = No, "stew" ≠ "pasta" = No]
-
-CRITICAL: If image shows "stew" but ad says "ice cream" → Product Match = No
-If image shows "pasta" but ad says "stew" → Product Match = No
-Only match if the product TYPE is the same.
-
-STEP 2: Logical consistency (CRITICAL)
+STEP 1: Logical consistency (CRITICAL)
 Check if target audience conflicts with product characteristics:
 - If target audience = "people who hate spicy" AND product contains "spicy" → CONTRADICTION → Logical Consistency = No
 - If target audience = "spicy lovers" AND product is "spicy" → NO CONTRADICTION → Logical Consistency = Yes
@@ -281,7 +269,6 @@ CRITICAL RULES:
 
 ## 4. Final Assessment (EXACT format)
 Match Score: [0-10]/10
-Product/Food Match: [Yes/No]
 Logical Consistency: [Yes/No - No if "hate spicy" + "spicy product"]
 Mismatch Detected: [Yes/No]
 Mismatch Details: [List issues or "None"]
@@ -289,19 +276,15 @@ Overall Assessment: [Suitable/Not Suitable]
 Reasoning: [Brief explanation]
 
 CRITICAL SCORING RULES (MUST FOLLOW):
-- If Product/Food Match = No (e.g., "stew" ≠ "ice cream", "pasta" ≠ "stew") → Match Score MUST be 0-3/10, Mismatch Detected = Yes, Not Suitable
-- If Logical Consistency = No (e.g., "hate spicy" + "spicy product") → Match Score MUST be 0-3/10, Mismatch Detected = Yes, Not Suitable
-- If Mismatch Detected = Yes → Match Score MUST be 0-3/10, Not Suitable
-- If Product/Food Match = Yes AND Logical Consistency = Yes AND Mismatch Detected = No → Match Score can be 7-10/10, Suitable
-- Examples of Product mismatch: "stew" ≠ "ice cream", "pasta" ≠ "burger", "soup" ≠ "salad"
-- Examples of Logical mismatch: "hate spicy" + "spicy", "mild" + "extra spicy"
+- If Logical Consistency = No (target audience conflicts with product characteristics) → Match Score MUST be 0-2/10, Mismatch Detected = Yes, Not Suitable
+- If Mismatch Detected = Yes → Match Score MUST be 0-2/10, Not Suitable
+- If Logical Consistency = Yes AND Mismatch Detected = No → Match Score can be 7-10/10, Suitable
 
 RULES:
-- If Logical Consistency = No → Mismatch Detected = Yes, Overall Assessment = Not Suitable, Match Score = 0-3/10
-- If "hate spicy" + "spicy product" → Logical Consistency = No, Mismatch Detected = Yes, Not Suitable, Match Score = 0-3/10
-- If product types differ (e.g., "stew" vs "ice cream") → Product Match = No, Mismatch Detected = Yes, Not Suitable, Match Score = 0-3/10
+- If Logical Consistency = No → Mismatch Detected = Yes, Overall Assessment = Not Suitable, Match Score = 0-2/10
+- If target audience explicitly states they dislike a characteristic that the product has → Logical Consistency = No, Mismatch Detected = Yes, Not Suitable, Match Score = 0-2/10
 - If target audience = "none" → Logical Consistency = Yes (no contradiction to check)
-- Any contradiction or mismatch → Not Suitable, Match Score = 0-3/10"""
+- Any contradiction or mismatch → Not Suitable, Match Score = 0-2/10"""
         else:
             validation_prompt = image_analysis_prompt + "\n\n3. Provide general recommendations for advertising use.\n\nProvide your analysis."
     
@@ -314,22 +297,42 @@ RULES:
     # 불일치 감지 (구조화된 형식 우선)
     has_mismatch = False
     mismatch_details = ""
-    product_match = None
     logical_consistency = None
     
-    # Logical Consistency 확인 (우선순위 1)
-    logical_consistency_match = re.search(r'logical\s+consistency[:\s]+(yes|no)', response_lower)
-    if logical_consistency_match:
-        logical_consistency = logical_consistency_match.group(1).lower() == "yes"
-        if not logical_consistency:
-            has_mismatch = True
+    # 후처리: 광고 문구에서 직접 논리적 모순 패턴 찾기 (LLaVa 응답보다 우선)
+    direct_logical_contradiction = False
+    if ad_copy_text:
+        ad_lower = ad_copy_text.lower()
+        # "hate spicy", "dislike spicy", "don't like spicy" 등의 패턴 찾기
+        negative_patterns = [
+            r'hate\s+spicy',
+            r'dislike\s+spicy',
+            r"don'?t\s+like\s+spicy",
+            r'not\s+for\s+.*spicy',
+            r'avoid\s+spicy',
+            r'people\s+who\s+hate\s+spicy',
+            r'people\s+who\s+dislike\s+spicy',
+        ]
+        # 광고 문구에 "spicy"가 포함되어 있는지 확인
+        has_spicy_in_ad = 'spicy' in ad_lower
+        
+        # 타겟 오디언스가 매운 것을 싫어하는데 제품이 매운 경우
+        for pattern in negative_patterns:
+            if re.search(pattern, ad_lower, re.IGNORECASE):
+                if has_spicy_in_ad:
+                    direct_logical_contradiction = True
+                    logical_consistency = False
+                    has_mismatch = True
+                    mismatch_details = "Target audience dislikes spicy food but product is described as spicy"
+                    break
     
-    # Product/Food Match 확인 (우선순위 2)
-    product_match_match = re.search(r'product/food\s+match[:\s]+(yes|no)', response_lower)
-    if product_match_match:
-        product_match = product_match_match.group(1).lower() == "yes"
-        if not product_match:
-            has_mismatch = True
+    # Logical Consistency 확인 (LLaVa 응답에서, 후처리 결과가 없을 때만)
+    if logical_consistency is None:
+        logical_consistency_match = re.search(r'logical\s+consistency[:\s]+(yes|no)', response_lower)
+        if logical_consistency_match:
+            logical_consistency = logical_consistency_match.group(1).lower() == "yes"
+            if not logical_consistency:
+                has_mismatch = True
     
     # 구조화된 형식에서 불일치 확인
     mismatch_detected_match = re.search(r'mismatch\s+detected[:\s]+(yes|no)', response_lower)
@@ -356,16 +359,18 @@ RULES:
     relevance_score = None
     
     # 구조화된 형식에서 점수 추출 (우선순위 1)
-    structured_score_match = re.search(r'match\s+score[:\s]+(\d+(?:\.\d+)?)\s*/10', response_lower)
+    # 범위 형식 처리 (예: "7-10/10" -> 최소값 사용)
+    structured_score_match = re.search(r'match\s+score[:\s]+(\d+(?:\.\d+)?)(?:\s*-\s*\d+)?\s*/10', response_lower)
     if structured_score_match:
-        relevance_score = float(structured_score_match.group(1)) / 10.0
+        score_value = float(structured_score_match.group(1))
+        relevance_score = score_value / 10.0
     else:
         # 다양한 패턴으로 점수 찾기 (우선순위 2)
         score_patterns = [
-            r'rating[:\s]+(\d+(?:\.\d+)?)\s*/10',  # "Rating: 10/10"
-            r'score[:\s]+(\d+(?:\.\d+)?)\s*/10',   # "Score: 9/10"
-            r'match[:\s]+(\d+(?:\.\d+)?)\s*/10',   # "Match: 8/10"
-            r'(\d+(?:\.\d+)?)\s*/10',              # "10/10" 또는 "9/10"
+            r'rating[:\s]+(\d+(?:\.\d+)?)(?:\s*-\s*\d+)?\s*/10',  # "Rating: 10/10" or "Rating: 7-10/10"
+            r'score[:\s]+(\d+(?:\.\d+)?)(?:\s*-\s*\d+)?\s*/10',   # "Score: 9/10" or "Score: 7-10/10"
+            r'match[:\s]+(\d+(?:\.\d+)?)(?:\s*-\s*\d+)?\s*/10',   # "Match: 8/10" or "Match: 7-10/10"
+            r'(\d+(?:\.\d+)?)(?:\s*-\s*\d+)?\s*/10',              # "10/10" or "7-10/10"
             r'(\d+(?:\.\d+)?)\s+on\s+the\s+scale', # "9 on the scale"
             r'rate[:\s]+(\d+(?:\.\d+)?)',          # "Rate: 8"
         ]
@@ -396,17 +401,17 @@ RULES:
     
     # 점수 조정: 명확한 불일치가 있으면 강제로 낮은 점수 부여
     # LLaVa가 높은 점수를 줘도 불일치가 있으면 낮춤
-    max_score_for_mismatch = 0.3
+    # 불일치가 있으면 점수 차이를 더 명확하게 (0.1-0.2 범위)
+    max_score_for_mismatch = 0.2
+    min_score_for_mismatch = 0.1
     
-    if product_match is False:
-        # 제품명 불일치 (예: "stew" vs "ice cream") → 최대 0.3
-        relevance_score = min(relevance_score, max_score_for_mismatch)
-    elif logical_consistency is False:
-        # 논리적 모순 (예: "hate spicy" + "spicy product") → 최대 0.3
-        relevance_score = min(relevance_score, max_score_for_mismatch)
+    # 논리적 모순이 감지되면 무조건 낮은 점수 (후처리 결과 우선)
+    if logical_consistency is False:
+        # 논리적 모순 → 0.1로 강제 조정 (더 낮은 점수)
+        relevance_score = min_score_for_mismatch
     elif has_mismatch:
-        # 기타 불일치 감지 → 최대 0.3
-        relevance_score = min(relevance_score, max_score_for_mismatch)
+        # 기타 불일치 감지 → 0.1-0.2 범위로 강제 조정
+        relevance_score = min(relevance_score, max_score_for_mismatch) if relevance_score else min_score_for_mismatch
     
     # 적합성 판단 (구조화된 형식 우선)
     is_valid = None
@@ -414,24 +419,18 @@ RULES:
     if overall_assessment_match:
         is_valid = overall_assessment_match.group(1).lower().replace(" ", "") == "suitable"
         # Overall Assessment가 Suitable여도 불일치가 있으면 False로 변경
-        if is_valid and (product_match is False or logical_consistency is False or has_mismatch):
+        if is_valid and (logical_consistency is False or has_mismatch):
             is_valid = False
     else:
         # Logical Consistency가 No이면 자동으로 Not Suitable (최우선)
         if logical_consistency is False:
-            is_valid = False
-            # Logical Consistency가 No면 점수도 낮춤
-            if relevance_score is None or relevance_score > 0.3:
-                relevance_score = 0.3
-        # Product/Food Match가 No이면 자동으로 Not Suitable
-        elif product_match is False:
             is_valid = False
         # 점수 기반 판단 (fallback)
         elif relevance_score is not None:
             is_valid = relevance_score >= 0.7 and not has_mismatch
         else:
             # 키워드 기반 판단
-            is_valid = "suitable" in response_lower and not has_mismatch and (product_match is not False) and (logical_consistency is not False)
+            is_valid = "suitable" in response_lower and not has_mismatch and (logical_consistency is not False)
     
     image_quality_ok = "quality" in response_lower and ("good" in response_lower or "high" in response_lower or "excellent" in response_lower)
     
