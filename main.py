@@ -19,6 +19,7 @@
 # copyright: 2025 FeedlyAI
 ########################################################
 
+import os
 from fastapi import FastAPI
 from config import PART_NAME, HOST, PORT
 from middleware import metrics_middleware, metrics_endpoint
@@ -27,9 +28,17 @@ from routers import (
     gpt, refined_ad_copy
 )
 
+# root_path는 리버스 프록시(nginx) 뒤에서만 필요
+# 직접 접근 시에는 None으로 설정하여 /docs가 정상 작동하도록 함
+ROOT_PATH = os.getenv("ROOT_PATH", None)
+if ROOT_PATH is None and PART_NAME == "yh":
+    # 환경 변수가 없으면 기본적으로 None (직접 접근 모드)
+    # nginx 뒤에서 실행할 때는 ROOT_PATH=/api/yh 환경 변수 설정
+    ROOT_PATH = None
+
 app = FastAPI(
     title=f"app-{PART_NAME} (Planner/Overlay/Eval)",
-    root_path="/api/yh" if PART_NAME == "yh" else None
+    root_path=ROOT_PATH
 )
 
 # 미들웨어 등록

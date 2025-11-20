@@ -22,6 +22,9 @@ services:
       - DEVICE_TYPE=${DEVICE_TYPE:-cuda}
       - LLAVA_MODEL_NAME=${LLAVA_MODEL_NAME:-llava-hf/llava-1.5-7b-hf}
       - USE_QUANTIZATION=${USE_QUANTIZATION:-true}  # true: 8-bit 양자화 사용, false: FP16 사용
+      # GPU 설정 (NVIDIA GPU 사용)
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       # 현재 작업 디렉토리를 컨테이너에 마운트 (코드 변경 시 자동 반영)
       - .:/app
@@ -32,6 +35,8 @@ services:
     # depends_on: postgres 제거 (팀 도커의 postgres-yh 사용)
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Linux에서 호스트 접근을 위한 설정
+    # GPU 설정 (NVIDIA GPU 사용)
+    runtime: nvidia
 
   # ---------- PostgreSQL Database (개별 개발용) ----------
   # 팀 도커의 postgres-yh를 사용하므로 주석 처리
