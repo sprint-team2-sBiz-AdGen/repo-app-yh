@@ -27,7 +27,10 @@ from routers import (
     gpt, refined_ad_copy
 )
 
-app = FastAPI(title=f"app-{PART_NAME} (Planner/Overlay/Eval)")
+app = FastAPI(
+    title=f"app-{PART_NAME} (Planner/Overlay/Eval)",
+    root_path="/api/yh" if PART_NAME == "yh" else None
+)
 
 # 미들웨어 등록
 app.middleware("http")(metrics_middleware)

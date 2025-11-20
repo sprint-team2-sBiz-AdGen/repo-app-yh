@@ -18,6 +18,10 @@ services:
       - DB_USER=${DB_USER:-feedlyai}
       - DB_PASSWORD=${DB_PASSWORD:-feedlyai_password}
       # DATABASE_URL은 main.py에서 자동 구성되므로 명시적으로 설정하지 않음
+      # LLaVa 모델 설정
+      - DEVICE_TYPE=${DEVICE_TYPE:-cuda}
+      - LLAVA_MODEL_NAME=${LLAVA_MODEL_NAME:-llava-hf/llava-1.5-7b-hf}
+      - USE_QUANTIZATION=${USE_QUANTIZATION:-true}  # true: 8-bit 양자화 사용, false: FP16 사용
     volumes:
       # 현재 작업 디렉토리를 컨테이너에 마운트 (코드 변경 시 자동 반영)
       - .:/app

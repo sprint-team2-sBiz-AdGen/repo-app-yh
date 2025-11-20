@@ -23,11 +23,12 @@
 ########################################################
 
 import os
+import re
 from typing import Optional, Dict, Any
 from PIL import Image
 import torch
 from transformers import LlavaProcessor, LlavaForConditionalGeneration
-from config import LLAVA_MODEL_NAME, DEVICE_TYPE, MODEL_DIR
+from config import LLAVA_MODEL_NAME, DEVICE_TYPE, MODEL_DIR, USE_QUANTIZATION
 
 # 디바이스 설정
 DEVICE = DEVICE_TYPE if DEVICE_TYPE == "cuda" and torch.cuda.is_available() else "cpu"
@@ -59,20 +60,78 @@ def get_llava_model():
         
         # 모델 로드 (자동으로 MODEL_DIR에 캐시됨)
         print(f"Downloading/loading model from Hugging Face...")
-        _model = LlavaForConditionalGeneration.from_pretrained(
-            LLAVA_MODEL_NAME,
-            torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
-            device_map="auto" if DEVICE == "cuda" else None,
-            low_cpu_mem_usage=True,
-            cache_dir=MODEL_DIR
-        )
+        print(f"Quantization setting: {'Enabled (8-bit)' if USE_QUANTIZATION else 'Disabled (FP16/FP32)'}")
         
-        if DEVICE == "cpu":
+        # GPU 메모리 사용량 측정 (로드 전)
+        if DEVICE == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+            initial_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+        
+        # 메모리 최적화: 8-bit 양자화 사용 여부에 따라 선택
+        if DEVICE == "cuda" and USE_QUANTIZATION:
+            try:
+                from transformers import BitsAndBytesConfig
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                    bnb_8bit_compute_dtype=torch.float16
+                )
+                _model = LlavaForConditionalGeneration.from_pretrained(
+                    LLAVA_MODEL_NAME,
+                    quantization_config=quantization_config,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                    cache_dir=MODEL_DIR
+                )
+                print("✓ Model loaded with 8-bit quantization for memory efficiency")
+            except Exception as e:
+                print(f"⚠ 8-bit quantization failed: {e}")
+                print("Falling back to standard loading with memory limits...")
+                # 8-bit 양자화 실패 시 메모리 제한과 함께 로드
+                _model = LlavaForConditionalGeneration.from_pretrained(
+                    LLAVA_MODEL_NAME,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                    cache_dir=MODEL_DIR,
+                    max_memory={0: "20GiB"}  # GPU 메모리 제한
+                )
+                print("✓ Model loaded with FP16 (quantization disabled)")
+        elif DEVICE == "cuda":
+            # 양자화 비활성화: FP16으로 로드
+            _model = LlavaForConditionalGeneration.from_pretrained(
+                LLAVA_MODEL_NAME,
+                torch_dtype=torch.float16,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+                cache_dir=MODEL_DIR
+            )
+            print("✓ Model loaded with FP16 (quantization disabled)")
+        else:
+            # CPU 모드
+            _model = LlavaForConditionalGeneration.from_pretrained(
+                LLAVA_MODEL_NAME,
+                torch_dtype=torch.float32,
+                device_map=None,
+                low_cpu_mem_usage=True,
+                cache_dir=MODEL_DIR
+            )
             _model = _model.to(DEVICE)
+            print("✓ Model loaded on CPU")
+        
+        # GPU 메모리 사용량 측정 (로드 후)
+        if DEVICE == "cuda":
+            loaded_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+            peak_memory = torch.cuda.max_memory_allocated() / 1024**3  # GB
+            total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+            print(f"📊 GPU Memory Usage:")
+            print(f"   - Allocated: {loaded_memory:.2f} GB")
+            print(f"   - Peak (during load): {peak_memory:.2f} GB")
+            print(f"   - Total GPU: {total_memory:.2f} GB")
+            print(f"   - Usage: {loaded_memory/total_memory*100:.1f}%")
         
         _model.eval()
-        print(f"LLaVa model loaded successfully on {DEVICE}")
-        print(f"Model cached in: {MODEL_DIR}")
+        print(f"✓ LLaVa model loaded successfully on {DEVICE}")
+        print(f"✓ Model cached in: {MODEL_DIR}")
     
     return _processor, _model
 
@@ -99,8 +158,21 @@ def process_image_with_llava(
     """
     processor, model = get_llava_model()
     
-    # 이미지와 프롬프트 준비
-    inputs = processor(images=image, text=prompt, return_tensors="pt").to(DEVICE)
+    # LLaVa-1.5 프롬프트 형식: USER: <image>\n{prompt}\nASSISTANT:
+    # 이미지를 리스트로 전달하고 프롬프트를 올바른 형식으로 구성
+    formatted_prompt = f"USER: <image>\n{prompt}\nASSISTANT:"
+    
+    # GPU 메모리 정리
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+    
+    # 이미지와 프롬프트 준비 (이미지는 리스트로 전달)
+    # 메모리 최적화: CPU에서 처리 후 필요시 GPU로 이동
+    inputs = processor(images=[image], text=formatted_prompt, return_tensors="pt")
+    
+    # GPU로 이동 (8-bit 양자화된 모델은 자동으로 처리됨)
+    if DEVICE == "cuda":
+        inputs = {k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
     
     # 추론
     with torch.no_grad():
@@ -108,8 +180,14 @@ def process_image_with_llava(
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
-            do_sample=do_sample
+            do_sample=do_sample,
+            pad_token_id=processor.tokenizer.eos_token_id if processor.tokenizer.pad_token_id is None else processor.tokenizer.pad_token_id
         )
+    
+    # GPU 메모리 정리
+    if DEVICE == "cuda":
+        del inputs
+        torch.cuda.empty_cache()
     
     # 응답 디코딩
     response = processor.batch_decode(
@@ -119,8 +197,11 @@ def process_image_with_llava(
     )[0]
     
     # 프롬프트 부분 제거 (응답만 반환)
-    if prompt in response:
-        response = response.replace(prompt, "").strip()
+    # ASSISTANT: 이후의 텍스트만 추출
+    if "ASSISTANT:" in response:
+        response = response.split("ASSISTANT:")[-1].strip()
+    elif formatted_prompt in response:
+        response = response.replace(formatted_prompt, "").strip()
     
     return response
 
@@ -142,28 +223,195 @@ def validate_image_and_text(
         검증 결과 딕셔너리
     """
     if validation_prompt is None:
-        validation_prompt = """Analyze this image and evaluate:
-1. Image quality (resolution, clarity, composition)
-2. Whether the image is suitable for advertising
-3. If ad copy text is provided, check if it matches the image content
+        validation_prompt = """You are evaluating whether an ad copy text matches an advertisement image. Your goal is to determine if they are compatible, and if not, identify what needs to be fixed in the ad copy. Evaluate if the ad copy matches the image. Check compatibility and identify issues.
+
+
+## 1. Image Analysis
+- Product shown: [exact name: e.g., "kimchi stew", "pasta"]
+- Characteristics: [spicy/mild, color, ingredients]
+- Setting: [home/restaurant/office/etc.]
+- Mood: [cozy/formal/casual/etc.]"""
+    
+    if ad_copy_text:
+        validation_prompt += f"""
+
+## 2. Ad Copy Analysis
+Ad copy: "{ad_copy_text}"
+- Product mentioned: [exact name from ad]
+- Characteristics: [spicy/mild/etc. from ad]
+- Target audience: [ONLY extract if explicitly mentioned. Look for "for people who...", "for [group]", "target audience". If NOT mentioned, write "none". Examples: "for people who hate spicy" = "people who hate spicy", "for spicy lovers" = "spicy lovers", no mention = "none"]
+- Message: [main point]
+
+## 3. Compatibility Check
+STEP 1: Product match
+- Image: [product from section 1]
+- Ad: [product from section 2]
+- Match? [Yes/No - "stew" = "stew" = Yes, "stew" ≠ "pasta" = No]
+
+STEP 2: Logical consistency (CRITICAL)
+Check if target audience conflicts with product characteristics:
+- If target audience = "people who hate spicy" AND product contains "spicy" → CONTRADICTION → Logical Consistency = No
+- If target audience = "spicy lovers" AND product is "spicy" → NO CONTRADICTION → Logical Consistency = Yes
+- If target audience = "none" (not mentioned) → NO CONTRADICTION → Logical Consistency = Yes
+
+CRITICAL RULES:
+- "hate spicy" + "spicy [product]" = CONTRADICTION → Logical Consistency = No
+- "dislike spicy" + "spicy [product]" = CONTRADICTION → Logical Consistency = No
+- "spicy [product]" + no target audience = NO CONTRADICTION → Logical Consistency = Yes
+- "spicy [product]" + "for spicy lovers" = NO CONTRADICTION → Logical Consistency = Yes
+
+## 4. Final Assessment (EXACT format)
+Match Score: [0-10]/10
+Product/Food Match: [Yes/No]
+Logical Consistency: [Yes/No - No if "hate spicy" + "spicy product"]
+Mismatch Detected: [Yes/No]
+Mismatch Details: [List issues or "None"]
+Overall Assessment: [Suitable/Not Suitable]
+Reasoning: [Brief explanation]
+
+RULES:
+- If Logical Consistency = No → Mismatch Detected = Yes, Overall Assessment = Not Suitable, Match Score = 0-3/10
+- If "hate spicy" + "spicy product" → Logical Consistency = No, Mismatch Detected = Yes, Not Suitable
+- If product names differ → Product Match = No, Mismatch Detected = Yes, Not Suitable
+- If target audience = "none" → Logical Consistency = Yes (no contradiction to check)
+- Any contradiction or mismatch → Not Suitable"""
+    else:
+        validation_prompt += """
+3. Provide general recommendations for advertising use.
 
 Provide your analysis."""
     
-    if ad_copy_text:
-        validation_prompt += f"\n\nAd copy text: {ad_copy_text}\n\nDoes this ad copy match the image? Explain."
-    
     response = process_image_with_llava(image, validation_prompt)
     
-    # 응답 파싱 (간단한 예제, 실제로는 더 정교한 파싱 필요)
-    is_valid = "suitable" in response.lower() or "good" in response.lower()
-    image_quality_ok = "quality" in response.lower() and ("good" in response.lower() or "high" in response.lower())
+    # 응답 파싱 - 개선된 로직
+    response_lower = response.lower()
+    
+    # 불일치 감지 (구조화된 형식 우선)
+    has_mismatch = False
+    mismatch_details = ""
+    product_match = None
+    logical_consistency = None
+    
+    # Logical Consistency 확인 (우선순위 1)
+    logical_consistency_match = re.search(r'logical\s+consistency[:\s]+(yes|no)', response_lower)
+    if logical_consistency_match:
+        logical_consistency = logical_consistency_match.group(1).lower() == "yes"
+        if not logical_consistency:
+            has_mismatch = True
+    
+    # Product/Food Match 확인 (우선순위 2)
+    product_match_match = re.search(r'product/food\s+match[:\s]+(yes|no)', response_lower)
+    if product_match_match:
+        product_match = product_match_match.group(1).lower() == "yes"
+        if not product_match:
+            has_mismatch = True
+    
+    # 구조화된 형식에서 불일치 확인
+    mismatch_detected_match = re.search(r'mismatch\s+detected[:\s]+(yes|no)', response_lower)
+    if mismatch_detected_match:
+        mismatch_detected = mismatch_detected_match.group(1).lower() == "yes"
+        if mismatch_detected:
+            has_mismatch = True
+        # 불일치 상세 정보 추출
+        mismatch_details_match = re.search(r'mismatch\s+details[:\s]+([^\n]+?)(?:\n|Overall|Reasoning)', response_lower, re.IGNORECASE | re.DOTALL)
+        if mismatch_details_match:
+            mismatch_details = mismatch_details_match.group(1).strip()
+            if mismatch_details.lower() != "none" and len(mismatch_details) > 5:
+                has_mismatch = True
+    else:
+        # 키워드 기반 불일치 감지 (fallback)
+        mismatch_keywords = [
+            "mismatch", "doesn't match", "does not match", "contradict", 
+            "inappropriate", "incorrect", "wrong context", "different setting",
+            "not match", "unmatch", "conflict", "discrepancy", "different product"
+        ]
+        has_mismatch = any(keyword in response_lower for keyword in mismatch_keywords)
+    
+    # 점수 추출 (구조화된 형식 우선)
+    relevance_score = None
+    
+    # 구조화된 형식에서 점수 추출 (우선순위 1)
+    structured_score_match = re.search(r'match\s+score[:\s]+(\d+(?:\.\d+)?)\s*/10', response_lower)
+    if structured_score_match:
+        relevance_score = float(structured_score_match.group(1)) / 10.0
+    else:
+        # 다양한 패턴으로 점수 찾기 (우선순위 2)
+        score_patterns = [
+            r'rating[:\s]+(\d+(?:\.\d+)?)\s*/10',  # "Rating: 10/10"
+            r'score[:\s]+(\d+(?:\.\d+)?)\s*/10',   # "Score: 9/10"
+            r'match[:\s]+(\d+(?:\.\d+)?)\s*/10',   # "Match: 8/10"
+            r'(\d+(?:\.\d+)?)\s*/10',              # "10/10" 또는 "9/10"
+            r'(\d+(?:\.\d+)?)\s+on\s+the\s+scale', # "9 on the scale"
+            r'rate[:\s]+(\d+(?:\.\d+)?)',          # "Rate: 8"
+        ]
+        for pattern in score_patterns:
+            score_match = re.search(pattern, response_lower)
+            if score_match:
+                score_value = float(score_match.group(1))
+                # 10점 만점인 경우만 정규화
+                if '/10' in pattern or 'scale' in pattern:
+                    relevance_score = score_value / 10.0
+                else:
+                    # 이미 0-1 스케일인 경우
+                    relevance_score = min(score_value, 1.0)
+                break
+    
+    if relevance_score is None:
+        # 점수가 없으면 불일치 여부로 판단
+        if has_mismatch:
+            relevance_score = 0.3  # 불일치 감지 시 낮은 점수
+        elif "perfect match" in response_lower or "excellent match" in response_lower:
+            relevance_score = 0.95
+        elif "good match" in response_lower or "matches well" in response_lower:
+            relevance_score = 0.8
+        elif "suitable" in response_lower or "match" in response_lower:
+            relevance_score = 0.6
+        else:
+            relevance_score = 0.5
+    
+    # 적합성 판단 (구조화된 형식 우선)
+    is_valid = None
+    overall_assessment_match = re.search(r'overall\s+assessment[:\s]+(suitable|not\s+suitable)', response_lower)
+    if overall_assessment_match:
+        is_valid = overall_assessment_match.group(1).lower().replace(" ", "") == "suitable"
+    else:
+        # Logical Consistency가 No이면 자동으로 Not Suitable (최우선)
+        if logical_consistency is False:
+            is_valid = False
+            # Logical Consistency가 No면 점수도 낮춤
+            if relevance_score is None or relevance_score > 0.3:
+                relevance_score = 0.3
+        # Product/Food Match가 No이면 자동으로 Not Suitable
+        elif product_match is False:
+            is_valid = False
+        # 점수 기반 판단 (fallback)
+        elif relevance_score is not None:
+            is_valid = relevance_score >= 0.7 and not has_mismatch
+        else:
+            # 키워드 기반 판단
+            is_valid = "suitable" in response_lower and not has_mismatch and (product_match is not False) and (logical_consistency is not False)
+    
+    image_quality_ok = "quality" in response_lower and ("good" in response_lower or "high" in response_lower or "excellent" in response_lower)
+    
+    # 이슈 추출
+    issues = []
+    if has_mismatch:
+        if mismatch_details and mismatch_details.lower() != "none":
+            issues.append(mismatch_details)
+        else:
+            # 불일치 내용 추출
+            mismatch_section = re.search(r'mismatch[^.]*\.', response_lower, re.IGNORECASE)
+            if mismatch_section:
+                issues.append(mismatch_section.group(0))
+            else:
+                issues.append("Context mismatch detected between image and ad copy")
     
     return {
         "is_valid": is_valid,
         "image_quality_ok": image_quality_ok,
-        "relevance_score": 0.95 if is_valid else 0.5,  # TODO: 실제 점수 계산
+        "relevance_score": relevance_score,
         "analysis": response,
-        "issues": [],
+        "issues": issues,
         "recommendations": []
     }
 

@@ -49,6 +49,12 @@ PART_ASSETS_DIR = os.path.join(ASSETS_DIR, PART_NAME)
 LLAVA_MODEL_NAME = os.getenv("LLAVA_MODEL_NAME", "llava-hf/llava-1.5-7b-hf")
 DEVICE_TYPE = os.getenv("DEVICE_TYPE", "cuda")  # cuda 또는 cpu
 
+# 양자화 설정 (8-bit 양자화 사용 여부)
+# 환경변수 USE_QUANTIZATION을 설정하여 제어 가능
+# "true", "1", "yes", "on" 등의 문자열이면 양자화 사용, 그 외는 사용 안 함
+# 기본값: true (양자화 사용)
+USE_QUANTIZATION = os.getenv("USE_QUANTIZATION", "true").lower() in ("true", "1", "yes", "on")
+
 # 모델 저장 디렉토리 (프로젝트 루트의 model 폴더)
 # config.py가 프로젝트 루트에 있으므로 현재 파일의 디렉토리를 기준으로 설정
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
