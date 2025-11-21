@@ -21,3 +21,7 @@ docs/
 __init__.py
 # Ignore all __init__.py in any subfolder
 **/__init__.py
+
+# Ignore test artifacts in output/
+output/*.json
+output/*.png

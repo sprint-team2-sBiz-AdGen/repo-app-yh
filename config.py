@@ -60,3 +60,23 @@ USE_QUANTIZATION = os.getenv("USE_QUANTIZATION", "true").lower() in ("true", "1"
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# YOLO 모델 설정
+YOLO_MODEL_NAME = os.getenv("YOLO_MODEL_NAME", "yolov8x-seg.pt")
+YOLO_CONF_THRESHOLD = float(os.getenv("YOLO_CONF_THRESHOLD", "0.25"))
+YOLO_IOU_THRESHOLD = float(os.getenv("YOLO_IOU_THRESHOLD", "0.45"))
+
+# YOLO 금지 라벨 설정 (쉼표로 구분된 문자열 또는 JSON 배열)
+# 환경 변수가 없으면 기본 금지 라벨 리스트 사용
+YOLO_FORBIDDEN_LABELS_ENV = os.getenv("YOLO_FORBIDDEN_LABELS", None)
+if YOLO_FORBIDDEN_LABELS_ENV:
+    import json
+    try:
+        # JSON 배열 형식 시도
+        YOLO_FORBIDDEN_LABELS = json.loads(YOLO_FORBIDDEN_LABELS_ENV)
+    except json.JSONDecodeError:
+        # 쉼표로 구분된 문자열 형식
+        YOLO_FORBIDDEN_LABELS = [label.strip() for label in YOLO_FORBIDDEN_LABELS_ENV.split(",") if label.strip()]
+else:
+    # 기본값: None (서비스에서 기본 리스트 사용)
+    YOLO_FORBIDDEN_LABELS = None
+

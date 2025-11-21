@@ -18,6 +18,8 @@ dependencies = [
     "torch>=2.0.0",
     "accelerate>=0.25.0",
     "bitsandbytes>=0.41.0",  # 8-bit 양자화 지원 (선택사항, 메모리 절약)
+    # YOLO 모델 관련
+    "ultralytics>=8.0.0",  # YOLOv8 모델 지원
 ]
 
 [build-system]
