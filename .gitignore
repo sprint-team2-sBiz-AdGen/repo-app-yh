@@ -23,5 +23,5 @@ __init__.py
 **/__init__.py
 
 # Ignore test artifacts in output/
-output/*.json
-output/*.png
+test/output/*.json
+test/output/*.png

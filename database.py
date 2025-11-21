@@ -17,6 +17,7 @@
 # copyright: 2025 FeedlyAI
 ########################################################
 
+import datetime
 from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -43,6 +44,20 @@ class OverlayLayout(Base):
     pk = Column(Integer)
     created_at = Column(DateTime(timezone=True))
     updated_at = Column(DateTime(timezone=True))
+
+
+class TestAsset(Base):
+    """테스트용 Asset 테이블 (간단한 insert/delete 테스트용)"""
+    __tablename__ = "test_assets"
+    
+    asset_id = Column(UUID(as_uuid=True), primary_key=True)
+    tenant_id = Column(String(255), nullable=False)
+    asset_url = Column(String(500), nullable=False)
+    asset_kind = Column(String(100))  # forbidden_mask, final, etc.
+    width = Column(Integer)
+    height = Column(Integer)
+    created_at = Column(DateTime(timezone=True), default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
 
 def get_db():

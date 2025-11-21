@@ -27,13 +27,14 @@
 ########################################################
 
 import os
-ASSETS_DIR = os.getenv("ASSETS_DIR", "/var/www/assets")
+ASSETS_DIR = os.getenv("ASSETS_DIR", "/opt/feedlyai/assets")
 PART_NAME = os.getenv("PART_NAME", "yh")  # 파트 이름 (ye, yh, js, sh)
 PORT = int(os.getenv("PORT", "8011"))
 HOST = os.getenv("HOST", "127.0.0.1")  # 로컬 개발 시 localhost만, Docker에서는 0.0.0.0
 
 # Docker 환경에서는 'postgres' 호스트명 사용, 로컬에서는 'localhost'
-DB_HOST = os.getenv("DB_HOST", "postgres")
+# 로컬 환경 감지: Docker 컨테이너 내부가 아닌 경우 localhost 사용
+DB_HOST = os.getenv("DB_HOST", "localhost" if not os.path.exists("/.dockerenv") else "postgres")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "feedlyai")
 DB_USER = os.getenv("DB_USER", "feedlyai")
