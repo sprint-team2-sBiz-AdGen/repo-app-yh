@@ -21,7 +21,7 @@
 ########################################################
 
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 
 class DetectIn(BaseModel):
@@ -36,6 +36,50 @@ class PlannerIn(BaseModel):
     tenant_id: str
     asset_url: str
     detections: Optional[dict] = None
+    min_overlay_width: Optional[float] = 0.5  # 최소 오버레이 너비 비율 (0-1)
+    min_overlay_height: Optional[float] = 0.12  # 최소 오버레이 높이 비율 (0-1)
+    max_proposals: Optional[int] = 10  # 최대 제안 개수
+    max_forbidden_iou: Optional[float] = 0.05  # 최대 허용 금지 영역 IoU (0-1)
+
+
+class ProposalOut(BaseModel):
+    """제안 응답 모델"""
+    proposal_id: str
+    xywh: List[float]  # [x, y, width, height] (정규화된 좌표)
+    source: str  # 제안 출처 (rule_top, grid_*, max_size_* 등)
+    color: str  # 텍스트 색상 (hex)
+    size: int  # 텍스트 크기
+    score: Optional[float] = None  # 제안 점수
+    occlusion_iou: Optional[float] = None  # 금지 영역과의 IoU
+    area: Optional[float] = None  # 제안 영역 면적 (최대 크기 제안의 경우)
+
+
+class PlannerOut(BaseModel):
+    """Planner 응답 모델"""
+    proposals: List[ProposalOut]  # 제안 리스트
+    avoid: Optional[List[float]] = None  # 금지 영역 [x, y, width, height] (정규화된 좌표)
+    min_overlay_width: Optional[float] = 0.5  # 최소 오버레이 너비 비율 (0-1)
+    min_overlay_height: Optional[float] = 0.12  # 최소 오버레이 높이 비율 (0-1)
+    max_proposals: Optional[int] = 10  # 최대 제안 개수
+    max_forbidden_iou: Optional[float] = 0.05  # 최대 허용 금지 영역 IoU (0-1)
+
+
+class ProposalOut(BaseModel):
+    """제안 응답 모델"""
+    proposal_id: str
+    xywh: List[float]  # [x, y, width, height] (정규화된 좌표)
+    source: str  # 제안 출처 (rule_top, grid_*, max_size_* 등)
+    color: str  # 텍스트 색상 (hex)
+    size: int  # 텍스트 크기
+    score: Optional[float] = None  # 제안 점수
+    occlusion_iou: Optional[float] = None  # 금지 영역과의 IoU
+    area: Optional[float] = None  # 제안 영역 면적 (최대 크기 제안의 경우)
+
+
+class PlannerOut(BaseModel):
+    """Planner 응답 모델"""
+    proposals: List[ProposalOut]  # 제안 리스트
+    avoid: Optional[List[float]] = None  # 금지 영역 [x, y, width, height] (정규화된 좌표)
 
 
 class OverlayIn(BaseModel):
