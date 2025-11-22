@@ -1,20 +1,18 @@
 
 """Planner 라우터"""
 ########################################################
-# TODO: Implement the actual planner logic
-#       - Propose the text overlay position
-#       - Return the proposal
-#       - Return the proposal ID
-#       - Return the proposal position
-#       - Return the proposal color
-#       - Return the proposal size
-#       - Return the proposal source
+# 텍스트 오버레이 위치 제안 API
+# 
+# 기능:
+# - 금지 영역을 피한 최적의 위치 제안
+# - 여러 위치 옵션 생성 (상단, 하단, 좌측, 우측)
+# - YOLO 감지 결과 활용
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-20
+# updated_at: 2025-11-21
 # author: LEEYH205
 # description: Planner logic
-# version: 0.1.0
+# version: 0.2.0
 # status: development
 # tags: planner
 # dependencies: fastapi, pydantic, PIL, requests
@@ -22,11 +20,14 @@
 # copyright: 2025 FeedlyAI
 ########################################################
 
-import uuid
 from fastapi import APIRouter
 from PIL import Image
 from models import PlannerIn
 from utils import abs_from_url
+from services.planner_service import propose_overlay_positions
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/yh/planner", tags=["planner"])
 
@@ -35,19 +36,26 @@ router = APIRouter(prefix="/api/yh/planner", tags=["planner"])
 def planner(body: PlannerIn):
     """이미지에 텍스트 오버레이를 배치할 위치 제안"""
     im = Image.open(abs_from_url(body.asset_url))
-    w, h = im.size
-    # very simple: propose top banner area avoiding center box if provided
-    avoid = None
-    if body.detections and body.detections.get("boxes"):
-        bx = body.detections["boxes"][0]
-        avoid = [bx[0] / w, bx[1] / h, (bx[2] - bx[0]) / w, (bx[3] - bx[1]) / h]  # xywh normalized
-    # proposal: top area 80% width, 18% height
-    proposal = {
-        "proposal_id": str(uuid.uuid4()),
-        "xywh": [0.1, 0.05, 0.8, 0.18],
-        "color": "0d0d0dff",
-        "size": 32,
-        "source": "rule"
-    }
-    return {"proposals": [proposal], "avoid": avoid}
+    
+    # 금지 영역 마스크 추출 (detections에 forbidden_mask_url이 있는 경우)
+    forbidden_mask = None
+    if body.detections and body.detections.get("forbidden_mask_url"):
+        try:
+            mask_url = body.detections["forbidden_mask_url"]
+            forbidden_mask = Image.open(abs_from_url(mask_url))
+            logger.info(f"금지 영역 마스크 로드: {mask_url}")
+        except Exception as e:
+            logger.warning(f"금지 영역 마스크 로드 실패: {e}")
+    
+    # 위치 제안 생성
+    result = propose_overlay_positions(
+        image=im,
+        detections=body.detections,
+        forbidden_mask=forbidden_mask,
+        min_overlay_width=0.5,
+        min_overlay_height=0.12,
+        max_proposals=10
+    )
+    
+    return result
 
