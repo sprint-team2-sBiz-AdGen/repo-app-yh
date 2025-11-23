@@ -19,6 +19,7 @@
 | `test_yolo.py` | YOLO 금지 영역 감지 테스트 | `--mode` |
 | `test_asset_db.py` | Asset 저장 및 DB 작업 테스트 | `--mode` |
 | `test_llava_stage1.py` | LLaVa Stage 1 검증 테스트 | 없음 |
+| `test_overlay.py` | 텍스트 오버레이 삽입 테스트 | `--test` |
 | `compare_ad_copy.py` | 광고 문구 비교 테스트 | 없음 |
 
 ---
@@ -195,7 +196,52 @@ python3 test/test_llava_stage1.py
 
 ---
 
-### 5. compare_ad_copy.py - 광고 문구 비교 테스트
+### 5. test_overlay.py - 텍스트 오버레이 삽입 테스트
+
+Planner에서 제안한 위치에 광고 문구를 오버레이하는 기능을 테스트합니다.
+
+#### 기본 실행 (단일 제안)
+
+```bash
+python3 test/test_overlay.py
+```
+
+또는
+
+```bash
+python3 test/test_overlay.py --test single
+```
+
+#### 모든 제안 각각 테스트
+
+각 제안마다 별도의 이미지를 생성합니다:
+
+```bash
+python3 test/test_overlay.py --test all
+```
+
+#### 모든 제안 통합 테스트
+
+하나의 이미지에 모든 제안을 표시합니다:
+
+```bash
+python3 test/test_overlay.py --test combined
+```
+
+#### 테스트 결과
+
+- `test/output/overlay_single.png` - 첫 번째 제안에 텍스트 오버레이
+- `test/output/overlay_XX_*.png` - 각 제안별 오버레이 이미지 (all 모드)
+- `test/output/overlay_combined.png` - 모든 제안 통합 오버레이 (combined 모드)
+
+#### 주의사항
+
+- `planner_result.json` 파일이 있어야 합니다. 먼저 `test_planner.py`를 실행하세요.
+- 실제로는 DB에서 planner 결과와 광고 문구를 가져옵니다.
+
+---
+
+### 6. compare_ad_copy.py - 광고 문구 비교 테스트
 
 두 개의 광고 문구를 비교하여 LLaVa가 올바르게 구분하는지 테스트합니다.
 
@@ -229,6 +275,9 @@ python3 test/test_asset_db.py --mode single
 
 # LLaVa 테스트
 python3 test/test_llava_stage1.py
+
+# Overlay 테스트 (단일)
+python3 test/test_overlay.py --test single
 
 # 광고 문구 비교 테스트
 python3 test/compare_ad_copy.py
@@ -297,8 +346,9 @@ export DEVICE_TYPE=cpu
 
 1. **YOLO 테스트** → 금지 영역 감지 확인
 2. **Planner 테스트** → YOLO 결과를 사용한 위치 제안 확인
-3. **Asset/DB 테스트** → 파일 저장 및 DB 작업 확인
-4. **LLaVa 테스트** → 이미지-텍스트 검증 확인
+3. **Overlay 테스트** → Planner 제안 위치에 텍스트 오버레이 확인
+4. **Asset/DB 테스트** → 파일 저장 및 DB 작업 확인
+5. **LLaVa 테스트** → 이미지-텍스트 검증 확인
 
 ---
 
