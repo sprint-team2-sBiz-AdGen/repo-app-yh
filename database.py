@@ -18,9 +18,11 @@
 ########################################################
 
 import datetime
-from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, ForeignKey
+import uuid
+from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, ForeignKey, Text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.sql import func
 from config import DATABASE_URL
 
 Base = declarative_base()
@@ -44,6 +46,50 @@ class OverlayLayout(Base):
     pk = Column(Integer)
     created_at = Column(DateTime(timezone=True))
     updated_at = Column(DateTime(timezone=True))
+
+
+class ImageAsset(Base):
+    """Image Assets 데이터베이스 모델"""
+    __tablename__ = "image_assets"
+    
+    image_asset_id = Column(UUID(as_uuid=True), primary_key=True)
+    image_type = Column(String(50))
+    image_url = Column(Text, nullable=False)
+    mask_url = Column(Text)
+    width = Column(Integer)
+    height = Column(Integer)
+    creator_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True)
+    tenant_id = Column(String(255), ForeignKey("tenants.tenant_id"), nullable=True)
+    uid = Column(String(255), unique=True)
+    pk = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class LLMImage(Base):
+    """LLM Image 데이터베이스 모델"""
+    __tablename__ = "llm_image"
+    
+    llm_image_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    image_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"))
+    prompt = Column(Text)
+    uid = Column(String(255), unique=True)
+    pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL 타입, DB에서 자동 생성
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class LLMTraces(Base):
+    """LLM Traces 데이터베이스 모델"""
+    __tablename__ = "llm_traces"
+    
+    llm_trace_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    llm_image_id = Column(UUID(as_uuid=True), ForeignKey("llm_image.llm_image_id"))
+    response = Column(JSONB)
+    uid = Column(String(255), unique=True)
+    pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL 타입, DB에서 자동 생성
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class TestAsset(Base):
