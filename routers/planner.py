@@ -28,7 +28,7 @@ import uuid
 from models import PlannerIn, PlannerOut, ProposalOut
 from utils import abs_from_url
 from services.planner_service import propose_overlay_positions
-from database import get_db, Job, JobInput, ImageAsset, Detection, YOLORun
+from database import get_db, Job, JobInput, ImageAsset, Detection, YOLORun, PlannerProposal
 import logging
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,25 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                 status_code=400,
                 detail=f"Job tenant_id mismatch"
             )
+        
+        # Step 0.5: job 상태 확인 (current_step='yolo_detect', status='done'이어야 함)
+        if job.current_step != 'yolo_detect' or job.status != 'done':
+            logger.error(f"Job 상태가 planner 실행 조건을 만족하지 않음: current_step={job.current_step}, status={job.status}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Job 상태가 planner 실행 조건을 만족하지 않습니다. current_step='yolo_detect', status='done'이어야 합니다. (현재: current_step='{job.current_step}', status='{job.status}')"
+            )
+        
+        # Step 0.6: Planner 시작 - job 상태 업데이트 (current_step='planner', status='running')
+        try:
+            job.current_step = 'planner'
+            job.status = 'running'
+            db.commit()
+            logger.info(f"Job 상태 업데이트: job_id={job_id}, current_step='planner', status='running'")
+        except Exception as e:
+            logger.error(f"Job 상태 업데이트 실패: {e}")
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Job 상태 업데이트 중 오류가 발생했습니다: {str(e)}")
         
         # Step 1: job_inputs에서 이미지 정보 가져오기
         asset_url = body.asset_url
@@ -201,14 +220,93 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
             ProposalOut(**prop) for prop in result.get("proposals", [])
         ]
         
+        # Step 5.5: planner_proposals 테이블에 결과 저장
+        try:
+            # job_input에서 image_asset_id 가져오기 (이미 위에서 확인함)
+            job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
+            image_asset_id = job_input.img_asset_id if job_input else None
+            
+            if image_asset_id:
+                # 전체 결과를 layout JSONB에 저장
+                import json
+                layout_data = {
+                    "proposals": [prop.dict() for prop in proposals],
+                    "avoid": result.get("avoid"),
+                    "min_overlay_width": body.min_overlay_width,
+                    "min_overlay_height": body.min_overlay_height,
+                    "max_proposals": body.max_proposals,
+                    "max_forbidden_iou": body.max_forbidden_iou
+                }
+                
+                # planner_proposals에 저장 (raw SQL 사용, pk는 SERIAL로 자동 생성)
+                proposal_id = uuid.uuid4()
+                proposal_uid = uuid.uuid4().hex
+                db.execute(
+                    text("""
+                        INSERT INTO planner_proposals (
+                            proposal_id, image_asset_id, layout, uid,
+                            created_at, updated_at
+                        ) VALUES (
+                            :proposal_id, :image_asset_id, CAST(:layout AS jsonb), :uid,
+                            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        )
+                    """),
+                    {
+                        "proposal_id": proposal_id,
+                        "image_asset_id": image_asset_id,
+                        "layout": json.dumps(layout_data),
+                        "uid": proposal_uid
+                    }
+                )
+                db.commit()
+                logger.info(f"Planner proposal saved to DB: proposal_id={proposal_id}, image_asset_id={image_asset_id}")
+            else:
+                logger.warning(f"Could not save planner proposal: image_asset_id not found for job_id={job_id}")
+        except Exception as e:
+            logger.error(f"Failed to save planner proposal to DB: {e}")
+            db.rollback()
+            # DB 저장 실패해도 결과는 반환
+            logger.warning(f"Planner proposal DB save failed but continuing: {e}")
+        
+        # Step 6: Planner 완료 - job 상태 업데이트 (status='done')
+        try:
+            job.status = 'done'
+            db.commit()
+            logger.info(f"Job 상태 업데이트: job_id={job_id}, status='done'")
+        except Exception as e:
+            logger.error(f"Job 상태 업데이트 실패: {e}")
+            db.rollback()
+            # 상태 업데이트 실패해도 결과는 반환
+            logger.warning(f"Job 상태 업데이트 실패했지만 결과는 반환합니다: {e}")
+        
         return PlannerOut(
             proposals=proposals,
             avoid=result.get("avoid")
         )
         
     except HTTPException:
+        # HTTPException 발생 시 job 상태를 failed로 업데이트
+        try:
+            job = db.query(Job).filter(Job.job_id == job_id).first()
+            if job:
+                job.status = 'failed'
+                db.commit()
+                logger.info(f"Job 상태 업데이트: job_id={job_id}, status='failed' (오류 발생)")
+        except Exception as e:
+            logger.error(f"Job 상태 업데이트 실패 (오류 처리 중): {e}")
+            db.rollback()
         raise
     except Exception as e:
+        # 기타 예외 발생 시 job 상태를 failed로 업데이트
+        try:
+            job = db.query(Job).filter(Job.job_id == job_id).first()
+            if job:
+                job.status = 'failed'
+                db.commit()
+                logger.info(f"Job 상태 업데이트: job_id={job_id}, status='failed' (예외 발생)")
+        except Exception as update_error:
+            logger.error(f"Job 상태 업데이트 실패 (예외 처리 중): {update_error}")
+            db.rollback()
         logger.error(f"Planner API 오류: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}")
 

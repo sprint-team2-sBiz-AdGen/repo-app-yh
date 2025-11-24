@@ -152,6 +152,20 @@ class YOLORun(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class PlannerProposal(Base):
+    """Planner Proposals 데이터베이스 모델"""
+    __tablename__ = "planner_proposals"
+    
+    proposal_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    image_asset_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"))
+    prompt = Column(Text, nullable=True)
+    layout = Column(JSONB, nullable=True)  # 레이아웃 정보 (전체 proposals 정보 포함)
+    uid = Column(String(255), unique=True, nullable=True)
+    pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class TestAsset(Base):
     """테스트용 Asset 테이블 (간단한 insert/delete 테스트용)"""
     __tablename__ = "test_assets"
