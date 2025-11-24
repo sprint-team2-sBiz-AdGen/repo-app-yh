@@ -121,6 +121,37 @@ class VLMTrace(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class Detection(Base):
+    """Detections 데이터베이스 모델"""
+    __tablename__ = "detections"
+    
+    detection_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=True)  # 같은 job의 detections를 그룹화
+    image_asset_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"))
+    model_id = Column(UUID(as_uuid=True), ForeignKey("gen_models.model_id"), nullable=True)
+    box = Column(JSONB)  # [x1, y1, x2, y2] 형식
+    label = Column(String(255))
+    score = Column(Float)  # DECIMAL(5,4) -> Float
+    uid = Column(String(255), unique=True, nullable=True)
+    pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class YOLORun(Base):
+    """YOLO 실행 결과 메타데이터 모델"""
+    __tablename__ = "yolo_runs"
+    
+    yolo_run_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), unique=True)  # 한 job당 하나의 yolo_run
+    image_asset_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"))
+    forbidden_mask_url = Column(Text, nullable=True)  # 금지 영역 마스크 URL
+    model_name = Column(String(255), nullable=True)  # 사용된 모델 이름
+    detection_count = Column(Integer, default=0)  # 감지된 객체 개수
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class TestAsset(Base):
     """테스트용 Asset 테이블 (간단한 insert/delete 테스트용)"""
     __tablename__ = "test_assets"
