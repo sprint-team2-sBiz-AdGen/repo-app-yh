@@ -112,8 +112,8 @@ class LLaVaStage1In(BaseModel):
     """LLaVa Stage 1 Validation 요청 모델"""
     job_id: str  # 기존 job의 ID (업데이트할 job)
     tenant_id: str
-    asset_url: str
-    ad_copy_text: Optional[str] = None
+    asset_url: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
+    ad_copy_text: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
     prompt: Optional[str] = None
 
 

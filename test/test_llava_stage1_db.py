@@ -15,7 +15,7 @@ os.environ["ASSETS_DIR"] = ASSETS_DIR
 # 환경 변수 설정 후 모듈 import
 from PIL import Image
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, text
 from database import SessionLocal, ImageAsset, Job, JobInput, VLMTrace, Base
 from utils import save_asset, abs_from_url
 from config import ASSETS_DIR, PART_NAME
@@ -199,9 +199,15 @@ def setup_test_data(db: Session, tenant_id: str, image_path: str = None) -> dict
     }
 
 
-def test_llava_stage1_api(job_id: str, tenant_id: str, asset_url: str, ad_copy_text: str = None):
+def test_llava_stage1_api(job_id: str, tenant_id: str = None, asset_url: str = None, ad_copy_text: str = None):
     """
     LLaVa Stage 1 API 테스트 (실제 API 호출)
+    
+    Args:
+        job_id: Job ID (필수)
+        tenant_id: Tenant ID (Optional, job에서 가져올 수 있으면 생략 가능)
+        asset_url: Asset URL (Optional, job_inputs에서 가져올 수 있으면 생략 가능)
+        ad_copy_text: Ad Copy Text (Optional, job_inputs에서 가져올 수 있으면 생략 가능)
     """
     print("\n" + "=" * 60)
     print("LLaVa Stage 1 API 테스트")
@@ -212,19 +218,28 @@ def test_llava_stage1_api(job_id: str, tenant_id: str, asset_url: str, ad_copy_t
     # API 엔드포인트
     api_url = "http://localhost:8011/api/yh/llava/stage1/validate"
     
-    # 요청 데이터
+    # 요청 데이터 (job_id는 필수, 나머지는 optional)
     request_data = {
-        "job_id": job_id,
-        "tenant_id": tenant_id,
-        "asset_url": asset_url,
-        "ad_copy_text": ad_copy_text
+        "job_id": job_id
     }
+    
+    # Optional 필드 추가
+    if tenant_id:
+        request_data["tenant_id"] = tenant_id
+    if asset_url:
+        request_data["asset_url"] = asset_url
+    if ad_copy_text:
+        request_data["ad_copy_text"] = ad_copy_text
     
     print(f"\n요청 데이터:")
     print(f"  - Job ID: {job_id}")
-    print(f"  - Tenant ID: {tenant_id}")
-    print(f"  - Asset URL: {asset_url}")
-    print(f"  - Ad Copy Text: {ad_copy_text or '(없음)'}")
+    if tenant_id:
+        print(f"  - Tenant ID: {tenant_id}")
+    if asset_url:
+        print(f"  - Asset URL: {asset_url}")
+    if ad_copy_text:
+        print(f"  - Ad Copy Text: {ad_copy_text}")
+    print(f"  (나머지 데이터는 job_inputs에서 자동으로 가져옵니다)")
     
     print(f"\nAPI 호출 중: {api_url}")
     try:
@@ -345,12 +360,14 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="LLaVa Stage 1 DB 연동 테스트")
+    parser.add_argument("--job-id", type=str, default=None,
+                       help="테스트할 job_id (없으면 setup_previous_stage.py를 먼저 실행하세요)")
     parser.add_argument("--tenant-id", default="test_llava_tenant",
-                       help="테스트용 tenant_id (기본: test_llava_tenant)")
+                       help="테스트용 tenant_id (기본: test_llava_tenant, job_id가 있으면 생략 가능)")
     parser.add_argument("--image-path", type=str, default=None,
-                       help="사용할 이미지 경로 (없으면 기본 이미지 사용: /opt/feedlyai/assets/yh/tenants/test_llava_tenant/test_llava/2025/11/24/7e330c4b-5deb-484b-b7d4-1a1945ad0237.png)")
-    parser.add_argument("--ad-copy", type=str, default="Spicy Pork Kimchi Stew – one spoon and you'll forget everything else.",
-                       help="광고 문구 텍스트")
+                       help="사용할 이미지 경로 (없으면 기본 이미지 사용, job_id가 있으면 무시됨)")
+    parser.add_argument("--ad-copy", type=str, default=None,
+                       help="광고 문구 텍스트 (job_id가 있으면 job_inputs에서 가져옴)")
     parser.add_argument("--skip-api", action="store_true",
                        help="API 호출 건너뛰기 (DB 데이터만 준비)")
     parser.add_argument("--api-url", default="http://localhost:8011",
@@ -368,38 +385,84 @@ def main():
         sys.exit(1)
     
     try:
-        # 1. 테스트 데이터 준비
-        test_data = setup_test_data(db, args.tenant_id, args.image_path)
-        
-        # 2. API 테스트 (건너뛰기 옵션이 없으면)
-        if not args.skip_api:
-            result = test_llava_stage1_api(
-                job_id=test_data["job_id"],
-                tenant_id=test_data["tenant_id"],
-                asset_url=test_data["asset_url"],
-                ad_copy_text=args.ad_copy
-            )
+        # job_id가 제공된 경우 (준비단계.py에서 생성된 job 사용)
+        if args.job_id:
+            print(f"\n✓ 제공된 job_id 사용: {args.job_id}")
+            print(f"  (job_inputs에서 이미지와 광고 텍스트를 자동으로 가져옵니다)")
             
-            # 3. DB 레코드 확인
-            if result:
-                verify_db_records(
-                    db,
-                    result.get("job_id"),
-                    result.get("vlm_trace_id")
+            # job에서 tenant_id 가져오기
+            job = db.execute(
+                text("SELECT tenant_id FROM jobs WHERE job_id = :job_id"),
+                {"job_id": uuid.UUID(args.job_id)}
+            ).first()
+            
+            if not job:
+                print(f"❌ Job을 찾을 수 없습니다: {args.job_id}")
+                sys.exit(1)
+            
+            tenant_id = job[0]
+            print(f"  - Tenant ID: {tenant_id}")
+            
+            # 2. API 테스트 (건너뛰기 옵션이 없으면)
+            if not args.skip_api:
+                result = test_llava_stage1_api(
+                    job_id=args.job_id,
+                    tenant_id=tenant_id,
+                    ad_copy_text=args.ad_copy  # Optional, job_inputs에서 가져올 수 있음
                 )
+                
+                # 3. DB 레코드 확인
+                if result:
+                    verify_db_records(
+                        db,
+                        result.get("job_id"),
+                        result.get("vlm_trace_id")
+                    )
+            else:
+                print("\n" + "=" * 60)
+                print("API 호출 건너뛰기 (job_id만 확인됨)")
+                print("=" * 60)
+                print(f"\nJob ID: {args.job_id}")
+                print(f"Tenant ID: {tenant_id}")
+                print(f"\n다음 명령으로 API를 테스트할 수 있습니다:")
+                print(f"  python3 test/test_llava_stage1_db.py --job-id {args.job_id} --tenant-id {tenant_id}")
         else:
-            print("\n" + "=" * 60)
-            print("API 호출 건너뛰기 (DB 데이터만 준비됨)")
-            print("=" * 60)
-            print(f"\n다음 명령으로 API를 테스트할 수 있습니다:")
-            print(f"  curl -X POST {args.api_url}/api/yh/llava/stage1/validate \\")
-            print(f"    -H 'Content-Type: application/json' \\")
-            print(f"    -d '{{")
-            print(f"      \"job_id\": \"{test_data['job_id']}\",")
-            print(f"      \"tenant_id\": \"{test_data['tenant_id']}\",")
-            print(f"      \"asset_url\": \"{test_data['asset_url']}\",")
-            print(f"      \"ad_copy_text\": \"{args.ad_copy}\"")
-            print(f"    }}'")
+            # job_id가 없는 경우: 기존 방식 (테스트 데이터 생성)
+            print(f"\n⚠ job_id가 제공되지 않았습니다. 기존 방식으로 테스트 데이터를 생성합니다.")
+            print(f"  (setup_previous_stage.py를 먼저 실행하여 job을 생성하는 것을 권장합니다)")
+            
+            # 1. 테스트 데이터 준비
+            test_data = setup_test_data(db, args.tenant_id, args.image_path)
+            
+            # 2. API 테스트 (건너뛰기 옵션이 없으면)
+            if not args.skip_api:
+                result = test_llava_stage1_api(
+                    job_id=test_data["job_id"],
+                    tenant_id=test_data["tenant_id"],
+                    asset_url=test_data["asset_url"],
+                    ad_copy_text=args.ad_copy or "Spicy Pork Kimchi Stew – one spoon and you'll forget everything else."
+                )
+                
+                # 3. DB 레코드 확인
+                if result:
+                    verify_db_records(
+                        db,
+                        result.get("job_id"),
+                        result.get("vlm_trace_id")
+                    )
+            else:
+                print("\n" + "=" * 60)
+                print("API 호출 건너뛰기 (DB 데이터만 준비됨)")
+                print("=" * 60)
+                print(f"\n다음 명령으로 API를 테스트할 수 있습니다:")
+                print(f"  curl -X POST {args.api_url}/api/yh/llava/stage1/validate \\")
+                print(f"    -H 'Content-Type: application/json' \\")
+                print(f"    -d '{{")
+                print(f"      \"job_id\": \"{test_data['job_id']}\",")
+                print(f"      \"tenant_id\": \"{test_data['tenant_id']}\",")
+                print(f"      \"asset_url\": \"{test_data['asset_url']}\",")
+                print(f"      \"ad_copy_text\": \"{args.ad_copy or ''}\"")
+                print(f"    }}'")
         
         print("\n" + "=" * 60)
         print("✓ 테스트 완료!")

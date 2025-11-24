@@ -44,8 +44,12 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         body: LLaVaStage1In 모델
             - job_id: 기존 job의 ID (업데이트할 job)
             - tenant_id: 테넌트 ID
-            - asset_url: 이미지 URL (예: /assets/yh/image_to_use/...)
-            - ad_copy_text: 광고 문구 텍스트 (Optional)
+            - asset_url: 이미지 URL (Optional, job_inputs에서 가져올 수 있으면 생략 가능)
+            - ad_copy_text: 광고 문구 텍스트 (Optional, job_inputs에서 가져올 수 있으면 생략 가능)
+        
+    Note:
+        - job_inputs 테이블에서 img_asset_id와 desc_eng을 가져와서 사용합니다.
+        - 요청에 asset_url이나 ad_copy_text가 제공되면 그것을 우선 사용합니다.
             - prompt: 커스텀 검증 프롬프트 (Optional, None이면 기본 프롬프트 사용)
     
     Returns:
@@ -104,37 +108,54 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         db.flush()
         logger.info(f"Updated job: {job_id} - status=running, current_step=vlm_analyze")
         
-        # Step 1: image_assets에서 image_asset_id 조회
-        image_asset = db.query(ImageAsset).filter(
-            and_(
-                ImageAsset.image_url == body.asset_url,
-                ImageAsset.tenant_id == body.tenant_id
-            )
-        ).first()
-        
-        if not image_asset:
-            logger.error(f"Image asset not found: asset_url={body.asset_url}, tenant_id={body.tenant_id}")
+        # Step 1: job_inputs에서 이미지와 광고 텍스트 가져오기
+        job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
+        if not job_input:
+            logger.error(f"Job input not found: job_id={job_id}")
             raise HTTPException(
                 status_code=404,
-                detail=f"Image asset not found for URL: {body.asset_url}"
+                detail=f"Job input not found for job_id: {job_id}"
             )
         
-        image_asset_id = image_asset.image_asset_id
-        logger.info(f"Found image asset: {image_asset_id} for URL: {body.asset_url}")
+        # job_inputs에서 image_asset_id 가져오기
+        image_asset_id = job_input.img_asset_id
+        if not image_asset_id:
+            logger.error(f"Image asset ID not found in job_input: job_id={job_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Image asset ID not found in job input"
+            )
+        
+        # image_assets에서 이미지 정보 가져오기
+        image_asset = db.query(ImageAsset).filter(ImageAsset.image_asset_id == image_asset_id).first()
+        if not image_asset:
+            logger.error(f"Image asset not found: image_asset_id={image_asset_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Image asset not found: {image_asset_id}"
+            )
+        
+        asset_url = image_asset.image_url
+        logger.info(f"Found image asset from job_input: {image_asset_id}, URL: {asset_url}")
+        
+        # job_inputs에서 광고 텍스트 가져오기 (요청에 없으면)
+        ad_copy_text = body.ad_copy_text if body.ad_copy_text else job_input.desc_eng
+        if not ad_copy_text:
+            logger.warning(f"Ad copy text not found in request or job_input: job_id={job_id}")
         
         # Step 2: 이미지 로드
         try:
-            image_path = abs_from_url(body.asset_url)
+            image_path = abs_from_url(asset_url)
             image = Image.open(image_path)
             logger.info(f"Image loaded successfully: {image_path}, size: {image.size}")
         except FileNotFoundError:
-            logger.error(f"Image file not found: {body.asset_url}")
+            logger.error(f"Image file not found: {asset_url}")
             raise HTTPException(
                 status_code=400,
-                detail=f"Image file not found: {body.asset_url}"
+                detail=f"Image file not found: {asset_url}"
             )
         except Exception as e:
-            logger.error(f"Failed to load image: {body.asset_url}, error: {str(e)}")
+            logger.error(f"Failed to load image: {asset_url}, error: {str(e)}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Failed to load image: {str(e)}"
@@ -143,50 +164,32 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         # Step 3: 검증 프롬프트 구성
         # ad_copy_text가 있으면 검증 프롬프트에 포함, 없으면 이미지 분석만
         validation_prompt = body.prompt
-        if validation_prompt is None and body.ad_copy_text:
+        if validation_prompt is None and ad_copy_text:
             # 기본 검증 프롬프트는 validate_image_and_text 내부에서 생성됨
             pass
         
-        # Step 4: job_inputs 레코드 확인/업데이트
-        job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
-        if job_input:
-            # 기존 job_input 업데이트
+        # Step 4: job_inputs 레코드 업데이트 (요청에 ad_copy_text가 있으면)
+        if body.ad_copy_text and body.ad_copy_text != job_input.desc_eng:
             db.execute(
                 text("""
                     UPDATE job_inputs 
-                    SET img_asset_id = :img_asset_id,
-                        desc_eng = :desc_eng,
+                    SET desc_eng = :desc_eng,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE job_id = :job_id
                 """),
                 {
                     "job_id": job_id,
-                    "img_asset_id": image_asset_id,
-                    "desc_eng": body.ad_copy_text if body.ad_copy_text else None
+                    "desc_eng": body.ad_copy_text
                 }
             )
-            logger.info(f"Updated job_input record for job: {job_id}")
-        else:
-            # 새 job_input 생성
-            db.execute(
-                text("""
-                    INSERT INTO job_inputs (job_id, img_asset_id, desc_eng, created_at, updated_at)
-                    VALUES (:job_id, :img_asset_id, :desc_eng, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                """),
-                {
-                    "job_id": job_id,
-                    "img_asset_id": image_asset_id,
-                    "desc_eng": body.ad_copy_text if body.ad_copy_text else None
-                }
-            )
-            logger.info(f"Created job_input record for job: {job_id}")
-        db.flush()
+            db.flush()
+            logger.info(f"Updated job_input desc_eng for job: {job_id}")
         
-        # Step 6: LLaVa를 사용한 검증
+        # Step 5: LLaVa를 사용한 검증
         try:
             result = validate_image_and_text(
                 image=image,
-                ad_copy_text=body.ad_copy_text,
+                ad_copy_text=ad_copy_text,  # job_inputs에서 가져온 값 사용
                 validation_prompt=validation_prompt
             )
             logger.info(f"Validation completed: is_valid={result.get('is_valid')}, score={result.get('relevance_score')}")
@@ -205,8 +208,8 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         
         # 요청 데이터 구성
         request_data = {
-            "asset_url": body.asset_url,
-            "ad_copy_text": body.ad_copy_text,
+            "asset_url": asset_url,  # job_inputs에서 가져온 값 사용
+            "ad_copy_text": ad_copy_text,  # job_inputs에서 가져온 값 사용
             "prompt": validation_prompt
         }
         
