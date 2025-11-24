@@ -102,8 +102,9 @@ class PlannerOut(BaseModel):
 
 class OverlayIn(BaseModel):
     """Overlay 요청 모델"""
+    job_id: str  # 기존 job의 ID (업데이트할 job)
     tenant_id: str
-    variant_asset_url: str
+    variant_asset_url: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
     proposal_id: Optional[str] = None
     text: str
     x_align: str = "center"
@@ -112,6 +113,13 @@ class OverlayIn(BaseModel):
     overlay_color: Optional[str] = None  # "00000080"
     text_color: Optional[str] = "ffffffff"
     margin: Optional[str] = "8px"
+
+
+class OverlayOut(BaseModel):
+    """Overlay 응답 모델 (DB ID 포함)"""
+    job_id: str  # UUID 문자열
+    overlay_id: Optional[str] = None  # UUID 문자열 (overlay_layouts 테이블에 저장된 경우)
+    render: dict  # 기존 render 메타데이터
 
 
 class EvalIn(BaseModel):
