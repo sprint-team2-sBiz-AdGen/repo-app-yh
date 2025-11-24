@@ -30,25 +30,35 @@ def setup_test_job(db: Session, tenant_id: str, image_path: str = None) -> dict:
     print("테스트 Job 생성 (img_gen 완료 상태)")
     print("=" * 60)
     
-    # 1. 이미지 준비
+    # 1. 이미지 준비 (기본 이미지 경로 사용)
+    default_image_path = "/opt/feedlyai/assets/yh/tenants/test_workflow_tenant/test_workflow/2025/11/24/7e330c4b-5deb-484b-b7d4-1a1945ad0237.png"
+    
     if image_path and os.path.exists(image_path):
-        print(f"\n[1/4] 기존 이미지 사용: {image_path}")
-        image = Image.open(image_path)
-        if image_path.startswith(ASSETS_DIR):
-            rel_path = image_path[len(ASSETS_DIR):].lstrip("/")
-            asset_url = f"/assets/{rel_path}"
-        else:
-            asset_meta = save_asset(tenant_id, "test_workflow", image, ".png")
-            asset_url = asset_meta["url"]
-            image_path = abs_from_url(asset_url)
+        print(f"\n[1/4] 지정된 이미지 사용: {image_path}")
+        actual_image_path = image_path
+    elif os.path.exists(default_image_path):
+        print(f"\n[1/4] 기본 이미지 사용: {default_image_path}")
+        actual_image_path = default_image_path
     else:
-        print(f"\n[1/4] 테스트 이미지 생성 중...")
-        image = Image.new("RGB", (512, 512), color=(255, 100, 50))
+        raise FileNotFoundError(
+            f"이미지를 찾을 수 없습니다.\n"
+            f"  - 지정된 경로: {image_path}\n"
+            f"  - 기본 경로: {default_image_path}\n"
+            f"YOLO detection을 위해 실제 이미지가 필요합니다."
+        )
+    
+    image = Image.open(actual_image_path)
+    if actual_image_path.startswith(ASSETS_DIR):
+        rel_path = actual_image_path[len(ASSETS_DIR):].lstrip("/")
+        asset_url = f"/assets/{rel_path}"
+    else:
+        # ASSETS_DIR 밖에 있으면 복사
         asset_meta = save_asset(tenant_id, "test_workflow", image, ".png")
         asset_url = asset_meta["url"]
-        image_path = abs_from_url(asset_url)
+        actual_image_path = abs_from_url(asset_url)
     
     print(f"  - Asset URL: {asset_url}")
+    print(f"  - Image Path: {actual_image_path}")
     print(f"  - Image Size: {image.size[0]}x{image.size[1]}")
     
     # 2. tenant 확인/생성

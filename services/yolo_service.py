@@ -10,7 +10,7 @@
 # - 바운딩 박스(xyxy 형식) 반환
 ########################################################
 # created_at: 2025-11-21
-# updated_at: 2025-11-21
+# updated_at: 2025-11-24
 # author: LEEYH205
 # description: YOLO model service
 # version: 0.1.0
