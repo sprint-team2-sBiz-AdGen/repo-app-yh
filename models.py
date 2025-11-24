@@ -110,16 +110,17 @@ class JudgeIn(BaseModel):
 
 class LLaVaStage1In(BaseModel):
     """LLaVa Stage 1 Validation 요청 모델"""
+    job_id: str  # 기존 job의 ID (업데이트할 job)
     tenant_id: str
-    asset_url: str
-    ad_copy_text: Optional[str] = None
+    asset_url: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
+    ad_copy_text: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
     prompt: Optional[str] = None
 
 
 class LLaVaStage1Out(BaseModel):
-    """LLaVa Stage 1 Validation 응답 모델"""
-    llm_image_id: str  # UUID 문자열
-    llm_trace_id: str  # UUID 문자열
+    """LLaVa Stage 1 Validation 응답 모델 (DB ID 포함)"""
+    job_id: str  # UUID 문자열
+    vlm_trace_id: str  # UUID 문자열
     is_valid: bool
     image_quality_ok: bool
     relevance_score: float

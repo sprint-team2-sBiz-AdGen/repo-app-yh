@@ -11,9 +11,9 @@ services:
       - PART_NAME=${PART_NAME:-your-part}
       - PORT=${PORT:-8000}
       - HOST=0.0.0.0
-      # PostgreSQL 연결 설정 (팀 도커의 postgres-yh 사용)
+      # PostgreSQL 연결 설정 (공용 postgres 사용)
       - DB_HOST=host.docker.internal
-      - DB_PORT=${DB_PORT:-5435}
+      - DB_PORT=${DB_PORT:-5432}
       - DB_NAME=${DB_NAME:-feedlyai}
       - DB_USER=${DB_USER:-feedlyai}
       - DB_PASSWORD=${DB_PASSWORD:-feedlyai_password}
