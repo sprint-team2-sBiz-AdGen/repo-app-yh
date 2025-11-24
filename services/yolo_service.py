@@ -10,7 +10,7 @@
 # - 바운딩 박스(xyxy 형식) 반환
 ########################################################
 # created_at: 2025-11-21
-# updated_at: 2025-11-21
+# updated_at: 2025-11-24
 # author: LEEYH205
 # description: YOLO model service
 # version: 0.1.0
@@ -45,11 +45,28 @@ def get_yolo_model(model_name: str = "yolov8x-seg.pt") -> YOLO:
     """YOLO 모델 로드 (싱글톤 패턴)"""
     global _model, _model_path
     
+    # 확장자가 없으면 .pt 추가
+    if model_name and not model_name.endswith(('.pt', '.onnx', '.engine')):
+        model_name = f"{model_name}.pt"
+    
     model_path = os.path.join(MODEL_DIR, model_name)
+    
+    # 디버깅: 경로 정보 출력
+    logger.info(f"[DEBUG] get_yolo_model called:")
+    logger.info(f"  - model_name parameter: {model_name}")
+    logger.info(f"  - MODEL_DIR: {MODEL_DIR}")
+    logger.info(f"  - YOLO_MODEL_NAME (from config): {YOLO_MODEL_NAME}")
+    logger.info(f"  - model_path: {model_path}")
+    logger.info(f"  - model_path exists: {os.path.exists(model_path)}")
+    logger.info(f"  - _model_path (current): {_model_path}")
     
     # 모델이 로드되지 않았거나 다른 모델을 요청한 경우
     if _model is None or _model_path != model_path:
         if not os.path.exists(model_path):
+            # 추가 디버깅: MODEL_DIR 내용 확인
+            if os.path.exists(MODEL_DIR):
+                files = os.listdir(MODEL_DIR)
+                logger.error(f"MODEL_DIR contents: {files}")
             raise FileNotFoundError(
                 f"YOLO 모델 파일을 찾을 수 없습니다: {model_path}\n"
                 f"다운로드 스크립트를 실행하세요: python download_yolo_model.py"
@@ -57,16 +74,21 @@ def get_yolo_model(model_name: str = "yolov8x-seg.pt") -> YOLO:
         
         print(f"Loading YOLO model: {model_name} on {DEVICE}")
         print(f"Model path: {model_path}")
+        logger.info(f"[DEBUG] Loading YOLO model: {model_name} on {DEVICE}")
+        logger.info(f"[DEBUG] Model path: {model_path}")
         
         # YOLO 모델 로드
         _model = YOLO(model_path)
         _model_path = model_path
+        
+        logger.info(f"[DEBUG] _model_path set to: {_model_path}")
         
         # 디바이스 설정
         if DEVICE == "cuda":
             _model.to(DEVICE)
         
         print(f"✓ YOLO model loaded successfully")
+        logger.info(f"[DEBUG] YOLO model loaded successfully, _model_path={_model_path}")
     
     return _model
 

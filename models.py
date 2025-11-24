@@ -9,7 +9,7 @@
 #       - JudgeIn
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-20    
+# updated_at: 2025-11-24    
 # author: LEEYH205
 # description: Pydantic models
 # version: 0.1.0
@@ -26,16 +26,34 @@ from typing import Optional, List
 
 class DetectIn(BaseModel):
     """YOLO 감지 요청 모델"""
+    job_id: str  # 기존 job의 ID (업데이트할 job)
     tenant_id: str
-    asset_url: str
+    asset_url: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
     model: Optional[str] = "forbidden"
+
+
+class DetectOut(BaseModel):
+    """YOLO 감지 응답 모델 (DB ID 포함)"""
+    job_id: str  # UUID 문자열
+    detection_ids: List[str]  # UUID 문자열 리스트 (detections 테이블에 저장된 detection_id들)
+    boxes: List[List[float]]  # 감지된 박스 리스트 (xyxy 형식)
+    model: str  # 사용된 모델 이름
+    confidences: List[float]  # 신뢰도 리스트
+    classes: List[int]  # 클래스 ID 리스트
+    labels: List[str]  # 라벨 리스트
+    areas: List[float]  # 영역 면적 리스트
+    widths: List[float]  # 너비 리스트
+    heights: List[float]  # 높이 리스트
+    forbidden_mask_url: Optional[str] = None  # 금지 영역 마스크 URL
+    detections: List[dict] = []  # JSON 형식 감지 결과
 
 
 class PlannerIn(BaseModel):
     """Planner 요청 모델"""
+    job_id: str  # 기존 job의 ID (DB에서 detections를 가져올 job)
     tenant_id: str
-    asset_url: str
-    detections: Optional[dict] = None
+    asset_url: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
+    detections: Optional[dict] = None  # Optional: DB에서 가져올 수 있으면 생략 가능 (하위 호환성 유지)
     min_overlay_width: Optional[float] = 0.5  # 최소 오버레이 너비 비율 (0-1)
     min_overlay_height: Optional[float] = 0.12  # 최소 오버레이 높이 비율 (0-1)
     max_proposals: Optional[int] = 10  # 최대 제안 개수
