@@ -25,7 +25,7 @@ import uuid
 from models import LLaVaStage1In, LLaVaStage1Out
 from utils import abs_from_url
 from services.llava_service import validate_image_and_text
-from database import get_db, ImageAsset, LLMImage, LLMTraces
+from database import get_db, ImageAsset, Job, JobInput, VLMTrace
 import logging
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
     
     Args:
         body: LLaVaStage1In 모델
+            - job_id: 기존 job의 ID (업데이트할 job)
             - tenant_id: 테넌트 ID
             - asset_url: 이미지 URL (예: /assets/yh/image_to_use/...)
             - ad_copy_text: 광고 문구 텍스트 (Optional)
@@ -49,8 +50,8 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
     
     Returns:
         LLaVaStage1Out:
-            - llm_image_id: str           # 생성된 llm_image 레코드 ID
-            - llm_trace_id: str            # 생성된 llm_trace 레코드 ID
+            - job_id: str                  # 업데이트된 job 레코드 ID
+            - vlm_trace_id: str            # 생성된 vlm_trace 레코드 ID
             - is_valid: bool               # 적합성 여부
             - image_quality_ok: bool       # 이미지 품질 OK 여부
             - relevance_score: float       # 관련성 점수 (0.0-1.0)
@@ -59,11 +60,50 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             - recommendations: List[str]   # 추천사항 목록
     
     Raises:
-        HTTPException 404: image_asset을 찾을 수 없는 경우
+        HTTPException 404: job 또는 image_asset을 찾을 수 없는 경우
         HTTPException 400: 이미지 파일을 찾을 수 없거나 로드할 수 없는 경우
         HTTPException 500: LLaVa 모델 로드, 검증, 또는 DB 저장 중 오류 발생
     """
     try:
+        # Step 0: 기존 job 조회 및 업데이트
+        try:
+            job_id = uuid.UUID(body.job_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid job_id format: {body.job_id}"
+            )
+        
+        job = db.query(Job).filter(Job.job_id == job_id).first()
+        if not job:
+            logger.error(f"Job not found: job_id={body.job_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Job not found: {body.job_id}"
+            )
+        
+        # job의 tenant_id 확인
+        if job.tenant_id != body.tenant_id:
+            logger.error(f"Job tenant_id mismatch: job.tenant_id={job.tenant_id}, request.tenant_id={body.tenant_id}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Job tenant_id mismatch"
+            )
+        
+        # job 상태 업데이트: current_step='vlm_analyze', status='running'
+        db.execute(
+            text("""
+                UPDATE jobs 
+                SET status = 'running', 
+                    current_step = 'vlm_analyze',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = :job_id
+            """),
+            {"job_id": job_id}
+        )
+        db.flush()
+        logger.info(f"Updated job: {job_id} - status=running, current_step=vlm_analyze")
+        
         # Step 1: image_assets에서 image_asset_id 조회
         image_asset = db.query(ImageAsset).filter(
             and_(
@@ -107,28 +147,42 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             # 기본 검증 프롬프트는 validate_image_and_text 내부에서 생성됨
             pass
         
-        # Step 4: llm_image 레코드 생성 (pk는 SERIAL이므로 raw SQL 사용)
-        llm_image_id = uuid.uuid4()
-        llm_image_uid = uuid.uuid4().hex
+        # Step 4: job_inputs 레코드 확인/업데이트
+        job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
+        if job_input:
+            # 기존 job_input 업데이트
+            db.execute(
+                text("""
+                    UPDATE job_inputs 
+                    SET img_asset_id = :img_asset_id,
+                        desc_eng = :desc_eng,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = :job_id
+                """),
+                {
+                    "job_id": job_id,
+                    "img_asset_id": image_asset_id,
+                    "desc_eng": body.ad_copy_text if body.ad_copy_text else None
+                }
+            )
+            logger.info(f"Updated job_input record for job: {job_id}")
+        else:
+            # 새 job_input 생성
+            db.execute(
+                text("""
+                    INSERT INTO job_inputs (job_id, img_asset_id, desc_eng, created_at, updated_at)
+                    VALUES (:job_id, :img_asset_id, :desc_eng, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """),
+                {
+                    "job_id": job_id,
+                    "img_asset_id": image_asset_id,
+                    "desc_eng": body.ad_copy_text if body.ad_copy_text else None
+                }
+            )
+            logger.info(f"Created job_input record for job: {job_id}")
+        db.flush()
         
-        # pk는 SERIAL 타입이므로 DB에서 자동 생성됨 (raw SQL로 제외)
-        db.execute(
-            text("""
-                INSERT INTO llm_image (llm_image_id, image_id, prompt, uid, created_at, updated_at)
-                VALUES (:llm_image_id, :image_id, :prompt, :uid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """),
-            {
-                "llm_image_id": llm_image_id,
-                "image_id": image_asset_id,
-                "prompt": validation_prompt if validation_prompt else (body.ad_copy_text or ""),
-                "uid": llm_image_uid
-            }
-        )
-        db.flush()  # ID를 얻기 위해 flush
-        
-        logger.info(f"Created llm_image record: {llm_image_id}")
-        
-        # Step 5: LLaVa를 사용한 검증
+        # Step 6: LLaVa를 사용한 검증
         try:
             result = validate_image_and_text(
                 image=image,
@@ -144,29 +198,58 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
                 detail=f"LLaVa validation failed: {str(e)}"
             )
         
-        # Step 6: llm_traces 레코드 생성 (검증 결과 저장, pk는 SERIAL이므로 raw SQL 사용)
-        llm_trace_id = uuid.uuid4()
-        llm_trace_uid = uuid.uuid4().hex
-        
-        # pk는 SERIAL 타입이므로 DB에서 자동 생성됨 (raw SQL로 제외)
+        # Step 7: vlm_traces 레코드 생성 (검증 결과 저장)
         import json
+        import time
+        vlm_trace_id = uuid.uuid4()
+        
+        # 요청 데이터 구성
+        request_data = {
+            "asset_url": body.asset_url,
+            "ad_copy_text": body.ad_copy_text,
+            "prompt": validation_prompt
+        }
+        
+        # 응답 데이터 구성 (검증 결과)
+        response_data = result
+        
+        # vlm_traces에 저장
         db.execute(
             text("""
-                INSERT INTO llm_traces (llm_trace_id, llm_image_id, response, uid, created_at, updated_at)
-                VALUES (:llm_trace_id, :llm_image_id, :response::jsonb, :uid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO vlm_traces (
+                    vlm_trace_id, job_id, provider, operation_type, 
+                    request, response, latency_ms, created_at, updated_at
+                )
+                VALUES (
+                    :vlm_trace_id, :job_id, :provider, :operation_type,
+                    CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
             """),
             {
-                "llm_trace_id": llm_trace_id,
-                "llm_image_id": llm_image_id,
-                "response": json.dumps(result),  # JSONB에 딕셔너리를 JSON 문자열로 변환
-                "uid": llm_trace_uid
+                "vlm_trace_id": vlm_trace_id,
+                "job_id": job_id,
+                "provider": "llava",
+                "operation_type": "analyze",
+                "request": json.dumps(request_data),
+                "response": json.dumps(response_data),
+                "latency_ms": None  # TODO: 실제 latency 측정 추가
             }
         )
         
-        # Step 7: 커밋
+        # Step 8: jobs 상태를 'done'으로 업데이트
+        db.execute(
+            text("""
+                UPDATE jobs SET status = 'done', updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = :job_id
+            """),
+            {"job_id": job_id}
+        )
+        
+        # Step 9: 커밋
         try:
             db.commit()
-            logger.info(f"Saved to DB: llm_image_id={llm_image_id}, llm_trace_id={llm_trace_id}")
+            logger.info(f"Saved to DB: job_id={job_id}, vlm_trace_id={vlm_trace_id}")
         except Exception as e:
             logger.error(f"Failed to commit to DB: {str(e)}", exc_info=True)
             db.rollback()
@@ -175,10 +258,10 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
                 detail=f"Failed to save validation result to database: {str(e)}"
             )
         
-        # Step 8: 응답 반환
+        # Step 10: 응답 반환
         return LLaVaStage1Out(
-            llm_image_id=str(llm_image_id),
-            llm_trace_id=str(llm_trace_id),
+            job_id=body.job_id,  # 요청에서 받은 job_id 그대로 반환
+            vlm_trace_id=str(vlm_trace_id),
             is_valid=result.get('is_valid'),
             image_quality_ok=result.get('image_quality_ok'),
             relevance_score=result.get('relevance_score'),

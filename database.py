@@ -66,28 +66,57 @@ class ImageAsset(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class LLMImage(Base):
-    """LLM Image 데이터베이스 모델"""
-    __tablename__ = "llm_image"
+class Tenant(Base):
+    """Tenants 데이터베이스 모델"""
+    __tablename__ = "tenants"
     
-    llm_image_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    image_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"))
-    prompt = Column(Text)
+    tenant_id = Column(String(255), primary_key=True)
+    display_name = Column(String(255))
     uid = Column(String(255), unique=True)
     pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL 타입, DB에서 자동 생성
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class LLMTraces(Base):
-    """LLM Traces 데이터베이스 모델"""
-    __tablename__ = "llm_traces"
+class Job(Base):
+    """Jobs 데이터베이스 모델"""
+    __tablename__ = "jobs"
     
-    llm_trace_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    llm_image_id = Column(UUID(as_uuid=True), ForeignKey("llm_image.llm_image_id"))
-    response = Column(JSONB)
-    uid = Column(String(255), unique=True)
-    pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL 타입, DB에서 자동 생성
+    job_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(String(255), ForeignKey("tenants.tenant_id"))
+    store_id = Column(UUID(as_uuid=True), nullable=True)
+    status = Column(String(50), default='queued')  # queued, running, done, failed
+    current_step = Column(String(255), nullable=True)  # 'vlm_analyze', 'vlm_planner', 'vlm_judge', 'llm_translate', 'llm_prompt', etc.
+    version = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class JobInput(Base):
+    """Job Inputs 데이터베이스 모델"""
+    __tablename__ = "job_inputs"
+    
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), primary_key=True)
+    img_asset_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"))
+    tone_style_id = Column(UUID(as_uuid=True), ForeignKey("tone_styles.tone_style_id"), nullable=True)
+    desc_kor = Column(Text, nullable=True)
+    desc_eng = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class VLMTrace(Base):
+    """VLM Traces 데이터베이스 모델"""
+    __tablename__ = "vlm_traces"
+    
+    vlm_trace_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"))
+    provider = Column(String(255))  # 'llava', etc.
+    prompt_id = Column(UUID(as_uuid=True), nullable=True)
+    operation_type = Column(String(255))  # 'analyze', 'planner', 'judge'
+    request = Column(JSONB, nullable=True)
+    response = Column(JSONB, nullable=True)
+    latency_ms = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

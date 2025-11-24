@@ -16,7 +16,7 @@ os.environ["ASSETS_DIR"] = ASSETS_DIR
 from PIL import Image
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
-from database import SessionLocal, ImageAsset, LLMImage, LLMTraces, Base
+from database import SessionLocal, ImageAsset, Job, JobInput, VLMTrace, Base
 from utils import save_asset, abs_from_url
 from config import ASSETS_DIR, PART_NAME
 import logging
@@ -159,15 +159,47 @@ def setup_test_data(db: Session, tenant_id: str, image_path: str = None) -> dict
         print(f"✓ image_asset 레코드 생성 완료:")
         print(f"  - Image Asset ID: {image_asset_id}")
     
+    # 4. jobs 테이블에 테스트용 job 생성
+    print(f"\n[3/3] job 확인/생성 중...")
+    from sqlalchemy import text
+    
+    # 기존 job이 있는지 확인 (같은 tenant_id로)
+    existing_job = db.execute(
+        text("SELECT job_id FROM jobs WHERE tenant_id = :tenant_id ORDER BY created_at DESC LIMIT 1"),
+        {"tenant_id": tenant_id}
+    ).first()
+    
+    if existing_job:
+        job_id = existing_job[0]
+        print(f"✓ 기존 job 레코드 사용:")
+        print(f"  - Job ID: {job_id}")
+    else:
+        print(f"  새로운 job 레코드 생성 중...")
+        job_id = uuid.uuid4()
+        db.execute(
+            text("""
+                INSERT INTO jobs (job_id, tenant_id, status, current_step, created_at, updated_at)
+                VALUES (:job_id, :tenant_id, 'queued', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """),
+            {
+                "job_id": job_id,
+                "tenant_id": tenant_id
+            }
+        )
+        db.commit()
+        print(f"✓ job 레코드 생성 완료:")
+        print(f"  - Job ID: {job_id}")
+    
     return {
         "tenant_id": tenant_id,
         "image_asset_id": str(image_asset_id),
         "asset_url": asset_url,
-        "image_path": image_path
+        "image_path": image_path,
+        "job_id": str(job_id)
     }
 
 
-def test_llava_stage1_api(tenant_id: str, asset_url: str, ad_copy_text: str = None):
+def test_llava_stage1_api(job_id: str, tenant_id: str, asset_url: str, ad_copy_text: str = None):
     """
     LLaVa Stage 1 API 테스트 (실제 API 호출)
     """
@@ -182,12 +214,14 @@ def test_llava_stage1_api(tenant_id: str, asset_url: str, ad_copy_text: str = No
     
     # 요청 데이터
     request_data = {
+        "job_id": job_id,
         "tenant_id": tenant_id,
         "asset_url": asset_url,
         "ad_copy_text": ad_copy_text
     }
     
     print(f"\n요청 데이터:")
+    print(f"  - Job ID: {job_id}")
     print(f"  - Tenant ID: {tenant_id}")
     print(f"  - Asset URL: {asset_url}")
     print(f"  - Ad Copy Text: {ad_copy_text or '(없음)'}")
@@ -201,8 +235,8 @@ def test_llava_stage1_api(tenant_id: str, asset_url: str, ad_copy_text: str = No
         
         print(f"\n✓ API 호출 성공!")
         print(f"\n응답 결과:")
-        print(f"  - LLM Image ID: {result.get('llm_image_id')}")
-        print(f"  - LLM Trace ID: {result.get('llm_trace_id')}")
+        print(f"  - Job ID: {result.get('job_id')}")
+        print(f"  - VLM Trace ID: {result.get('vlm_trace_id')}")
         print(f"  - Is Valid: {result.get('is_valid')}")
         print(f"  - Image Quality OK: {result.get('image_quality_ok')}")
         print(f"  - Relevance Score: {result.get('relevance_score')}")
@@ -235,7 +269,7 @@ def test_llava_stage1_api(tenant_id: str, asset_url: str, ad_copy_text: str = No
         return None
 
 
-def verify_db_records(db: Session, llm_image_id: str, llm_trace_id: str):
+def verify_db_records(db: Session, job_id: str, vlm_trace_id: str):
     """
     DB에 저장된 레코드 확인
     """
@@ -244,39 +278,56 @@ def verify_db_records(db: Session, llm_image_id: str, llm_trace_id: str):
     print("=" * 60)
     
     try:
-        # llm_image 확인
-        llm_image = db.query(LLMImage).filter(
-            LLMImage.llm_image_id == uuid.UUID(llm_image_id)
+        # jobs 확인
+        job = db.query(Job).filter(
+            Job.job_id == uuid.UUID(job_id)
         ).first()
         
-        if llm_image:
-            print(f"\n✓ llm_image 레코드 발견:")
-            print(f"  - LLM Image ID: {llm_image.llm_image_id}")
-            print(f"  - Image ID: {llm_image.image_id}")
-            print(f"  - Prompt: {llm_image.prompt[:100] if llm_image.prompt else '(없음)'}...")
-            print(f"  - Created At: {llm_image.created_at}")
+        if job:
+            print(f"\n✓ jobs 레코드 발견:")
+            print(f"  - Job ID: {job.job_id}")
+            print(f"  - Tenant ID: {job.tenant_id}")
+            print(f"  - Status: {job.status}")
+            print(f"  - Current Step: {job.current_step}")
+            print(f"  - Created At: {job.created_at}")
         else:
-            print(f"\n❌ llm_image 레코드를 찾을 수 없습니다: {llm_image_id}")
+            print(f"\n❌ jobs 레코드를 찾을 수 없습니다: {job_id}")
             return False
         
-        # llm_traces 확인
-        llm_trace = db.query(LLMTraces).filter(
-            LLMTraces.llm_trace_id == uuid.UUID(llm_trace_id)
+        # job_inputs 확인
+        job_input = db.query(JobInput).filter(
+            JobInput.job_id == uuid.UUID(job_id)
         ).first()
         
-        if llm_trace:
-            print(f"\n✓ llm_traces 레코드 발견:")
-            print(f"  - LLM Trace ID: {llm_trace.llm_trace_id}")
-            print(f"  - LLM Image ID: {llm_trace.llm_image_id}")
+        if job_input:
+            print(f"\n✓ job_inputs 레코드 발견:")
+            print(f"  - Job ID: {job_input.job_id}")
+            print(f"  - Image Asset ID: {job_input.img_asset_id}")
+            print(f"  - Desc Eng: {job_input.desc_eng[:100] if job_input.desc_eng else '(없음)'}...")
+            print(f"  - Created At: {job_input.created_at}")
+        else:
+            print(f"\n⚠ job_inputs 레코드를 찾을 수 없습니다: {job_id}")
+        
+        # vlm_traces 확인
+        vlm_trace = db.query(VLMTrace).filter(
+            VLMTrace.vlm_trace_id == uuid.UUID(vlm_trace_id)
+        ).first()
+        
+        if vlm_trace:
+            print(f"\n✓ vlm_traces 레코드 발견:")
+            print(f"  - VLM Trace ID: {vlm_trace.vlm_trace_id}")
+            print(f"  - Job ID: {vlm_trace.job_id}")
+            print(f"  - Provider: {vlm_trace.provider}")
+            print(f"  - Operation Type: {vlm_trace.operation_type}")
             print(f"  - Response (JSONB):")
-            if llm_trace.response:
-                response = llm_trace.response
+            if vlm_trace.response:
+                response = vlm_trace.response
                 print(f"    - is_valid: {response.get('is_valid')}")
                 print(f"    - relevance_score: {response.get('relevance_score')}")
                 print(f"    - issues: {response.get('issues')}")
-            print(f"  - Created At: {llm_trace.created_at}")
+            print(f"  - Created At: {vlm_trace.created_at}")
         else:
-            print(f"\n❌ llm_traces 레코드를 찾을 수 없습니다: {llm_trace_id}")
+            print(f"\n❌ vlm_traces 레코드를 찾을 수 없습니다: {vlm_trace_id}")
             return False
         
         print(f"\n✓ 모든 DB 레코드 확인 완료!")
@@ -323,6 +374,7 @@ def main():
         # 2. API 테스트 (건너뛰기 옵션이 없으면)
         if not args.skip_api:
             result = test_llava_stage1_api(
+                job_id=test_data["job_id"],
                 tenant_id=test_data["tenant_id"],
                 asset_url=test_data["asset_url"],
                 ad_copy_text=args.ad_copy
@@ -332,8 +384,8 @@ def main():
             if result:
                 verify_db_records(
                     db,
-                    result.get("llm_image_id"),
-                    result.get("llm_trace_id")
+                    result.get("job_id"),
+                    result.get("vlm_trace_id")
                 )
         else:
             print("\n" + "=" * 60)
@@ -343,6 +395,7 @@ def main():
             print(f"  curl -X POST {args.api_url}/api/yh/llava/stage1/validate \\")
             print(f"    -H 'Content-Type: application/json' \\")
             print(f"    -d '{{")
+            print(f"      \"job_id\": \"{test_data['job_id']}\",")
             print(f"      \"tenant_id\": \"{test_data['tenant_id']}\",")
             print(f"      \"asset_url\": \"{test_data['asset_url']}\",")
             print(f"      \"ad_copy_text\": \"{args.ad_copy}\"")
