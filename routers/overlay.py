@@ -155,22 +155,8 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                     if isinstance(layout, dict) and layout.get("proposals"):
                         proposals_list = layout["proposals"]
                         if proposals_list:
-                            # 여러 proposal 중에서 최적의 것 선택 (score가 높은 것 우선)
-                            # score가 없으면 첫 번째 proposal 사용
-                            best_proposal = None
-                            if len(proposals_list) > 1:
-                                # score가 있는 proposal 중에서 최고 점수 선택
-                                scored_proposals = [p for p in proposals_list if p.get("score") is not None]
-                                if scored_proposals:
-                                    best_proposal = max(scored_proposals, key=lambda p: p.get("score", 0))
-                                    logger.info(f"Selected best proposal by score: score={best_proposal.get('score')}, source={best_proposal.get('source')}")
-                                else:
-                                    # score가 없으면 첫 번째 proposal 사용
-                                    best_proposal = proposals_list[0]
-                                    logger.info(f"No scored proposals, using first proposal: source={best_proposal.get('source')}")
-                            else:
-                                best_proposal = proposals_list[0]
-                                logger.info(f"Using single proposal: source={best_proposal.get('source')}")
+                            # 위치 다양성을 고려한 proposal 선택
+                            best_proposal = _select_best_proposal_with_diversity(proposals_list, logger)
                             
                             if best_proposal and "xywh" in best_proposal:
                                 xywh = best_proposal["xywh"]  # [x, y, width, height] 정규화된 좌표
@@ -213,12 +199,8 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                         if isinstance(layout, dict) and layout.get("proposals"):
                             proposals_list = layout["proposals"]
                             if proposals_list:
-                                # score가 높은 proposal 선택
-                                scored_proposals = [p for p in proposals_list if p.get("score") is not None]
-                                if scored_proposals:
-                                    best_proposal = max(scored_proposals, key=lambda p: p.get("score", 0))
-                                else:
-                                    best_proposal = proposals_list[0]
+                                # 위치 다양성을 고려한 proposal 선택
+                                best_proposal = _select_best_proposal_with_diversity(proposals_list, logger)
                                 
                                 if best_proposal and "xywh" in best_proposal:
                                     xywh = best_proposal["xywh"]
@@ -753,4 +735,105 @@ def _load_font(font_paths: list, size: int) -> ImageFont.FreeTypeFont:
     
     logger.warning(f"사용 가능한 폰트를 찾지 못했습니다. 기본 폰트를 사용합니다. font_paths={font_paths}")
     return ImageFont.load_default()
+
+
+def _select_best_proposal_with_diversity(proposals_list: list, logger) -> dict:
+    """
+    위치 다양성을 고려하여 최적의 proposal 선택
+    
+    Args:
+        proposals_list: proposal 리스트
+        logger: 로거 객체
+    
+    Returns:
+        선택된 proposal 딕셔너리
+    """
+    print(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}")
+    logger.info(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}")
+    
+    if not proposals_list:
+        print(f"[위치 선택 함수] proposals_list가 비어있음")
+        logger.warning(f"[위치 선택 함수] proposals_list가 비어있음")
+        return None
+    
+    if len(proposals_list) == 1:
+        print(f"[위치 선택 함수] proposal이 1개만 있음: source={proposals_list[0].get('source')}")
+        logger.info(f"[위치 선택 함수] proposal이 1개만 있음: source={proposals_list[0].get('source')}")
+        return proposals_list[0]
+    
+    # source를 기반으로 위치 그룹 분류
+    def _get_position_group(source: str) -> str:
+        """source에서 위치 그룹 추출"""
+        if not source:
+            return "unknown"
+        source_lower = source.lower()
+        if "top" in source_lower:
+            return "top"
+        elif "bottom" in source_lower:
+            return "bottom"
+        elif "left" in source_lower:
+            return "left"
+        elif "right" in source_lower:
+            return "right"
+        elif "center" in source_lower or "middle" in source_lower:
+            return "center"
+        elif "max_size" in source_lower:
+            return "max_size"
+        else:
+            return "other"
+    
+    # 위치 그룹별로 proposal 분류
+    position_groups = {}
+    for prop in proposals_list:
+        source = prop.get("source", "")
+        group = _get_position_group(source)
+        if group not in position_groups:
+            position_groups[group] = []
+        position_groups[group].append(prop)
+    
+    print(f"[위치 선택 함수] 위치 그룹 분류 결과: {list(position_groups.keys())}, 각 그룹별 개수: {[(k, len(v)) for k, v in position_groups.items()]}")
+    logger.info(f"[위치 선택 함수] 위치 그룹 분류 결과: {list(position_groups.keys())}, 각 그룹별 개수: {[(k, len(v)) for k, v in position_groups.items()]}")
+    
+    # 각 그룹에서 최고 점수 proposal 선택
+    group_best = {}
+    for group, props in position_groups.items():
+        # score가 있는 proposal만 필터링
+        scored_props = [p for p in props if p.get("score") is not None]
+        if scored_props:
+            best = max(scored_props, key=lambda p: p.get("score", 0))
+            group_best[group] = best
+        elif props:
+            # score가 없으면 첫 번째 사용
+            group_best[group] = props[0]
+    
+    if not group_best:
+        # 모든 proposal에 score가 없으면 첫 번째 사용
+        return proposals_list[0]
+    
+    # 최종 선택: 우선순위 고려
+    # 1. max_size (최대 크기 제안) - 우선순위 최고
+    # 2. top (상단) - 일반적으로 좋은 위치
+    # 3. left, right (좌측, 우측) - 다양성 확보
+    # 4. bottom (하단) - 마지막 선택
+    # 5. center, other - 기타
+    
+    priority_order = ["max_size", "top", "left", "right", "bottom", "center", "other", "unknown"]
+    
+    for priority_group in priority_order:
+        if priority_group in group_best:
+            selected = group_best[priority_group]
+            logger.info(f"[위치 선택] 위치 그룹 '{priority_group}'에서 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}")
+            print(f"[위치 선택] 위치 그룹 '{priority_group}'에서 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}")
+            return selected
+    
+    # fallback: score가 가장 높은 것 선택
+    scored_proposals = [p for p in proposals_list if p.get("score") is not None]
+    if scored_proposals:
+        best = max(scored_proposals, key=lambda p: p.get("score", 0))
+        logger.info(f"[위치 선택] Fallback: 최고 점수 proposal 선택: source={best.get('source')}, score={best.get('score')}")
+        return best
+    
+    # 최후의 수단: 첫 번째 proposal
+    logger.info(f"[위치 선택] Fallback: 첫 번째 proposal 사용: source={proposals_list[0].get('source')}")
+    return proposals_list[0]
 

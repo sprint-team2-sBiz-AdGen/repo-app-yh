@@ -13,7 +13,7 @@ sys.path.insert(0, project_root)
 ASSETS_DIR = os.getenv("ASSETS_DIR", "/opt/feedlyai/assets")
 os.environ["ASSETS_DIR"] = ASSETS_DIR
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import SessionLocal, ImageAsset, Job, JobInput, Detection, YOLORun, PlannerProposal, OverlayLayout
@@ -482,6 +482,141 @@ def verify_db_records(db: Session, job_id: str):
         return False
 
 
+def print_file_paths(db: Session, job_id: str):
+    """파일 경로 정보 출력 및 제안 영역 시각화"""
+    print("\n" + "=" * 60)
+    print("파일 경로 정보")
+    print("=" * 60)
+    
+    try:
+        job = db.query(Job).filter(Job.job_id == uuid.UUID(job_id)).first()
+        if not job:
+            print("⚠ Job을 찾을 수 없습니다.")
+            return
+        
+        tenant_id = job.tenant_id
+        
+        job_input = db.query(JobInput).filter(JobInput.job_id == uuid.UUID(job_id)).first()
+        if not job_input:
+            print("⚠ Job input을 찾을 수 없습니다.")
+            return
+        
+        # 1. 원본 이미지 경로
+        image_asset = db.query(ImageAsset).filter(ImageAsset.image_asset_id == job_input.img_asset_id).first()
+        if image_asset:
+            original_image_path = abs_from_url(image_asset.image_url)
+            print(f"\n[원본 이미지]")
+            print(f"  - URL: {image_asset.image_url}")
+            print(f"  - 절대 경로: {original_image_path}")
+        
+        # 2. Forbidden mask 경로
+        yolo_run = db.query(YOLORun).filter(YOLORun.job_id == uuid.UUID(job_id)).first()
+        if yolo_run and yolo_run.forbidden_mask_url:
+            forbidden_mask_path = abs_from_url(yolo_run.forbidden_mask_url)
+            print(f"\n[Forbidden Mask]")
+            print(f"  - URL: {yolo_run.forbidden_mask_url}")
+            print(f"  - 절대 경로: {forbidden_mask_path}")
+        
+        # 3. 제안 영역 시각화 이미지 생성
+        planner_proposals = db.query(PlannerProposal).filter(
+            PlannerProposal.image_asset_id == job_input.img_asset_id
+        ).order_by(PlannerProposal.created_at.desc()).all()
+        
+        if planner_proposals and image_asset:
+            latest_proposal = planner_proposals[0]
+            if latest_proposal.layout and isinstance(latest_proposal.layout, dict):
+                proposals_list = latest_proposal.layout.get('proposals', [])
+                if proposals_list and os.path.exists(original_image_path):
+                    # 원본 이미지 로드
+                    img = Image.open(original_image_path).convert("RGBA")
+                    w, h = img.size
+                    draw = ImageDraw.Draw(img)
+                    
+                    # 각 proposal 영역 그리기
+                    for i, prop in enumerate(proposals_list):
+                        xywh = prop.get("xywh", [])
+                        if len(xywh) == 4:
+                            x, y, width, height = xywh
+                            # 정규화된 좌표를 픽셀 좌표로 변환
+                            px1 = int(x * w)
+                            py1 = int(y * h)
+                            px2 = int((x + width) * w)
+                            py2 = int((y + height) * h)
+                            
+                            # 박스 그리기 (색상: 빨강, 초록, 파랑 순서)
+                            colors = [(255, 0, 0, 200), (0, 255, 0, 200), (0, 0, 255, 200), 
+                                     (255, 255, 0, 200), (255, 0, 255, 200), (0, 255, 255, 200)]
+                            color = colors[i % len(colors)]
+                            
+                            # 박스 그리기
+                            draw.rectangle([px1, py1, px2, py2], outline=color, width=3)
+                            
+                            # source 라벨 추가
+                            source = prop.get("source", f"proposal_{i+1}")
+                            score = prop.get("score", 0)
+                            label = f"{source}\nscore:{score:.2f}"
+                            draw.text((px1 + 5, py1 + 5), label, fill=color)
+                    
+                    # 제안 영역 시각화 이미지 저장
+                    output_dir = os.path.join(ASSETS_DIR, "yh", "tenants", tenant_id, "proposals")
+                    os.makedirs(output_dir, exist_ok=True)
+                    proposal_viz_filename = f"proposals_{job_id[:8]}.png"
+                    proposal_viz_path = os.path.join(output_dir, proposal_viz_filename)
+                    img.save(proposal_viz_path)
+                    
+                    proposal_viz_url = f"/assets/yh/tenants/{tenant_id}/proposals/{proposal_viz_filename}"
+                    print(f"\n[제안 영역 시각화]")
+                    print(f"  - URL: {proposal_viz_url}")
+                    print(f"  - 절대 경로: {proposal_viz_path}")
+                    print(f"  - 제안 개수: {len(proposals_list)}")
+        
+        # 4. 최종 Overlay 이미지 경로
+        # proposal_id로 조회 시도
+        proposal_ids = [p.proposal_id for p in planner_proposals] if planner_proposals else []
+        overlay_layouts = []
+        
+        if proposal_ids:
+            overlay_layouts = db.query(OverlayLayout).filter(
+                OverlayLayout.proposal_id.in_(proposal_ids)
+            ).order_by(OverlayLayout.created_at.desc()).all()
+        
+        # proposal_id가 없거나 찾지 못한 경우, 최신 overlay_layouts 조회 (proposal_id가 None인 경우도 포함)
+        if not overlay_layouts:
+            overlay_layouts = db.query(OverlayLayout).order_by(
+                OverlayLayout.created_at.desc()
+            ).limit(5).all()
+            # 같은 image_asset_id를 가진 proposal과 연관된 overlay 찾기
+            if planner_proposals and image_asset:
+                for overlay in overlay_layouts:
+                    if overlay.proposal_id and overlay.proposal_id in proposal_ids:
+                        overlay_layouts = [overlay]
+                        break
+        
+        if overlay_layouts:
+            latest_overlay = overlay_layouts[0]
+            if latest_overlay.layout and isinstance(latest_overlay.layout, dict):
+                render = latest_overlay.layout.get('render', {})
+                overlay_url = render.get('url', '')
+                if overlay_url:
+                    overlay_path = abs_from_url(overlay_url)
+                    print(f"\n[최종 Overlay 이미지]")
+                    print(f"  - URL: {overlay_url}")
+                    print(f"  - 절대 경로: {overlay_path}")
+                    print(f"  - Overlay ID: {latest_overlay.overlay_id}")
+                    print(f"  - 파일명: {os.path.basename(overlay_path)}")
+                else:
+                    print(f"\n[최종 Overlay 이미지]")
+                    print(f"  - ⚠ render 정보에 URL이 없습니다.")
+        else:
+            print(f"\n[최종 Overlay 이미지]")
+            print(f"  - ⚠ Overlay layout을 찾을 수 없습니다.")
+        
+    except Exception as e:
+        print(f"\n❌ 파일 경로 확인 중 오류: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def main():
     """메인 테스트 함수"""
     import argparse
@@ -582,9 +717,19 @@ def main():
             print("=" * 60)
             check_job_status(db, job_id, expected_step="planner", expected_status="done")
             
-            # proposal_id 가져오기 (첫 번째 proposal 사용)
+            # proposal_id 가져오기: DB에 저장된 planner_proposals.proposal_id 사용
+            # (API 응답의 proposal_id는 각 proposal 내부 ID이므로, DB의 proposal_id를 사용해야 함)
+            proposal_id = None
             if planner_result.get('proposals'):
-                proposal_id = planner_result['proposals'][0].get('proposal_id')
+                # DB에서 최신 planner_proposal 찾기
+                job_input = db.query(JobInput).filter(JobInput.job_id == uuid.UUID(job_id)).first()
+                if job_input and job_input.img_asset_id:
+                    latest_proposal = db.query(PlannerProposal).filter(
+                        PlannerProposal.image_asset_id == job_input.img_asset_id
+                    ).order_by(PlannerProposal.created_at.desc()).first()
+                    if latest_proposal:
+                        proposal_id = str(latest_proposal.proposal_id)
+                        print(f"  - DB에서 찾은 Proposal ID: {proposal_id}")
         else:
             print("\n⚠ Planner 건너뛰기")
         
@@ -602,6 +747,9 @@ def main():
         
         # 최종 DB 레코드 확인
         verify_db_records(db, job_id)
+        
+        # 파일 경로 정보 출력
+        print_file_paths(db, job_id)
         
         print("\n" + "=" * 60)
         print("✓ Pipeline 테스트 완료!")
