@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 import uuid
 import json
+from typing import Tuple
 from models import OverlayIn, OverlayOut
 from utils import abs_from_url, save_asset, parse_hex_rgba
 from database import get_db, Job, JobInput, ImageAsset, PlannerProposal, OverlayLayout
@@ -160,13 +161,21 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                             logger.info(f"Using proposal layout: x={x}, y={y}, w={pw}, h={ph}")
                         else:
                             # proposal 정보가 없으면 기본값 사용
+                            logger.warning(f"Proposal layout has no valid proposals, using default layout")
+                            proposal_id_uuid = None  # proposal이 유효하지 않으므로 None으로 설정
                             x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                     else:
+                        logger.warning(f"Proposal layout is invalid, using default layout")
+                        proposal_id_uuid = None  # proposal이 유효하지 않으므로 None으로 설정
                         x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                 else:
+                    # proposal을 찾지 못했거나 layout이 없음
+                    logger.warning(f"Proposal not found or has no layout: proposal_id={body.proposal_id}, using default layout")
+                    proposal_id_uuid = None  # proposal을 찾지 못했으므로 None으로 설정
                     x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
             except ValueError:
                 logger.warning(f"Invalid proposal_id format: {body.proposal_id}, using default layout")
+                proposal_id_uuid = None  # 잘못된 형식이므로 None으로 설정
                 x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
         else:
             # default proposal region
@@ -181,28 +190,64 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         
         # draw text
         draw = ImageDraw.Draw(im)
-        # font: default Pillow
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", body.text_size)
-        except:
-            font = ImageFont.load_default()
-        tw, th = draw.textsize(body.text, font=font)
         
-        # alignment
-        if body.x_align == "left":
-            tx = x + 10
-        elif body.x_align == "right":
-            tx = x + pw - tw - 10
-        else:
-            tx = x + (pw - tw) // 2
-        if body.y_align == "top":
-            ty = y + 10
-        elif body.y_align == "bottom":
-            ty = y + ph - th - 10
-        else:
-            ty = y + (ph - th) // 2
+        # 패딩 적용 (old/overlay.py의 _apply_padding 로직)
+        padding_ratio = 0.08
+        pad_x = int(pw * padding_ratio)
+        pad_y = int(ph * padding_ratio)
+        padded_bbox = (
+            max(0, x + pad_x),
+            max(0, y + pad_y),
+            min(w, x + pw - pad_x),
+            min(h, y + ph - pad_y)
+        )
+        
+        # 사용 가능한 영역 계산
+        available_width = padded_bbox[2] - padded_bbox[0]
+        available_height = padded_bbox[3] - padded_bbox[1]
+        
+        # 폰트 크기 범위 설정
+        # 영역 크기에 따라 동적으로 조정
+        min_font_size = max(12, int(ph * 0.15))  # 영역 높이의 15% 또는 최소 12px
+        max_font_size = min(96, int(ph * 0.4))   # 영역 높이의 40% 또는 최대 96px
+        
+        if body.text_size and body.text_size > 0:
+            # 사용자가 지정한 크기를 최대값으로 사용하되, 범위 내에서만
+            max_font_size = max(min_font_size, min(max_font_size, body.text_size))
+        
+        logger.info(f"Font size range: min={min_font_size}, max={max_font_size}, available_height={available_height}")
+        
+        # 폰트 경로 후보
+        font_paths = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/local/lib/python3.11/site-packages/cv2/qt/fonts/DejaVuSans.ttf",
+            "/usr/local/lib/python3.11/site-packages/cv2/qt/fonts/DejaVuSans-Bold.ttf",
+        ]
+        
+        # 텍스트를 영역에 맞게 조정 (old/overlay.py의 _fit_text 로직)
+        font, wrapped_text = _fit_text(
+            draw, body.text, padded_bbox, font_paths, min_font_size, max_font_size
+        )
+        
+        # 텍스트 색상
         tc = parse_hex_rgba(body.text_color, (255, 255, 255, 255))
-        draw.text((tx, ty), body.text, fill=tc, font=font)
+        
+        # 텍스트 위치 계산 (중앙 정렬)
+        x_center = (padded_bbox[0] + padded_bbox[2]) / 2
+        y_center = (padded_bbox[1] + padded_bbox[3]) / 2
+        
+        # multiline_text로 그리기 (old/overlay.py 방식)
+        draw.multiline_text(
+            (x_center, y_center),
+            wrapped_text,
+            font=font,
+            fill=tc,
+            anchor="mm",  # 중앙 정렬
+            align="center",
+            spacing=6,  # 줄 간격
+        )
         
         # Step 3: 오버레이된 이미지 저장
         meta = save_asset(body.tenant_id, "final", im, ".png")
@@ -301,4 +346,166 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             db.rollback()
         logger.error(f"Overlay API 오류: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}")
+
+
+def _fit_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    bbox: Tuple[int, int, int, int],
+    font_paths: list,
+    min_font_size: int,
+    max_font_size: int,
+) -> Tuple[ImageFont.FreeTypeFont, str]:
+    """
+    텍스트를 bbox에 맞게 조정 (old/overlay.py의 _fit_text 로직)
+    
+    Args:
+        draw: ImageDraw 객체
+        text: 원본 텍스트
+        bbox: (x0, y0, x1, y1) 형식의 박스
+        font_paths: 폰트 경로 후보 리스트
+        min_font_size: 최소 폰트 크기
+        max_font_size: 최대 폰트 크기
+    
+    Returns:
+        (font, wrapped_text): 최적의 폰트와 줄바꿈된 텍스트
+    """
+    max_width = bbox[2] - bbox[0]
+    max_height = bbox[3] - bbox[1]
+    
+    # 큰 폰트부터 작은 폰트까지 시도
+    logger.warning(f"Fitting text in bbox: max_width={max_width}, max_height={max_height}, font_size_range=[{min_font_size}, {max_font_size}]")
+    
+    for size in range(max_font_size, min_font_size - 1, -2):
+        font = _load_font(font_paths, size)
+        wrapped = _wrap_text(draw, text, font, max_width)
+        
+        # multiline_textbbox로 정확한 크기 계산
+        try:
+            bbox_text = draw.multiline_textbbox(
+                (0, 0),
+                wrapped,
+                font=font,
+                spacing=6,
+                align="center",
+            )
+            text_width = bbox_text[2] - bbox_text[0]
+            text_height = bbox_text[3] - bbox_text[1]
+            
+            logger.warning(f"Font size {size}: text_width={text_width}, text_height={text_height}, wrapped_lines={len(wrapped.split(chr(10)))}")
+            
+            if text_width <= max_width and text_height <= max_height:
+                logger.warning(f"✓ Text fitted with font size {size}: width={text_width}/{max_width}, height={text_height}/{max_height}")
+                return font, wrapped
+        except AttributeError:
+            # multiline_textbbox가 없는 경우 fallback
+            try:
+                # 각 줄의 크기를 개별적으로 계산
+                lines = wrapped.split("\n")
+                text_width = 0
+                text_height = 0
+                for line in lines:
+                    try:
+                        line_bbox = draw.textbbox((0, 0), line, font=font)
+                        line_w = line_bbox[2] - line_bbox[0]
+                        line_h = line_bbox[3] - line_bbox[1]
+                    except AttributeError:
+                        try:
+                            line_w, line_h = draw.textsize(line, font=font)
+                        except:
+                            line_w = len(line) * size // 2
+                            line_h = size
+                    text_width = max(text_width, line_w)
+                    text_height += line_h
+                text_height += 6 * (len(lines) - 1)  # spacing
+                
+                if text_width <= max_width and text_height <= max_height:
+                    logger.info(f"Text fitted with font size {size} (fallback): width={text_width}/{max_width}, height={text_height}/{max_height}")
+                    return font, wrapped
+            except Exception as e:
+                logger.warning(f"Error calculating text size for font {size}: {e}")
+                continue
+    
+    # 최소 폰트 크기로 강제 적용
+    logger.warning(
+        f"텍스트를 박스에 맞추지 못했습니다. 최소 폰트 크기 {min_font_size}로 강제 적용합니다."
+    )
+    font = _load_font(font_paths, min_font_size)
+    wrapped = _wrap_text(draw, text, font, max_width)
+    return font, wrapped
+
+
+def _wrap_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    max_width: int,
+) -> str:
+    """
+    텍스트를 단어 단위로 나누어서 max_width에 맞게 줄바꿈 (old/overlay.py의 _wrap_text 로직)
+    
+    Args:
+        draw: ImageDraw 객체
+        text: 원본 텍스트
+        font: 폰트 객체
+        max_width: 최대 너비
+    
+    Returns:
+        줄바꿈된 텍스트
+    """
+    words = text.split()
+    if not words:
+        return text
+    
+    lines: list = []
+    current: list = []
+    
+    for word in words:
+        test_line = " ".join(current + [word]) if current else word
+        
+        # 텍스트 너비 계산
+        try:
+            bbox = draw.textbbox((0, 0), test_line, font=font)
+            width = bbox[2] - bbox[0]
+        except AttributeError:
+            try:
+                width, _ = draw.textsize(test_line, font=font)
+            except:
+                # 최후의 수단: 대략적인 계산
+                width = len(test_line) * font.size // 2
+        
+        if width <= max_width or not current:
+            current.append(word)
+        else:
+            lines.append(" ".join(current))
+            current = [word]
+    
+    if current:
+        lines.append(" ".join(current))
+    
+    return "\n".join(lines)
+
+
+def _load_font(font_paths: list, size: int) -> ImageFont.FreeTypeFont:
+    """
+    여러 경로에서 폰트 로드 시도 (old/overlay.py의 _load_font 로직)
+    
+    Args:
+        font_paths: 폰트 경로 후보 리스트
+        size: 폰트 크기
+    
+    Returns:
+        ImageFont 객체
+    """
+    for path in font_paths:
+        try:
+            font = ImageFont.truetype(path, size)
+            logger.debug(f"Font loaded: {path} (size={size})")
+            return font
+        except Exception as exc:
+            logger.debug(f"Failed to load font {path}: {exc}")
+            continue
+    
+    logger.warning(f"사용 가능한 폰트를 찾지 못했습니다. 기본 폰트를 사용합니다. font_paths={font_paths}")
+    return ImageFont.load_default()
 

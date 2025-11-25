@@ -21,6 +21,7 @@
 | `test_llava_stage1.py` | LLaVa Stage 1 검증 테스트 | 없음 |
 | `test_overlay.py` | 텍스트 오버레이 삽입 테스트 | `--test` |
 | `compare_ad_copy.py` | 광고 문구 비교 테스트 | 없음 |
+| `test_pipeline_full.py` | **전체 Pipeline 테스트 (llava→yolo→planner→overlay)** | `--skip-*` |
 
 ---
 
@@ -256,6 +257,67 @@ python3 test/compare_ad_copy.py
 - 좋은 광고 문구와 나쁜 광고 문구 비교
 - LLaVa의 관련성 점수 비교
 - 구분 정확도 확인
+
+---
+
+## 전체 Pipeline 테스트
+
+### `test_pipeline_full.py`
+
+전체 Pipeline을 순차적으로 테스트합니다: **LLaVA Stage 1 → YOLO → Planner → Overlay**
+
+#### 기본 실행
+
+```bash
+# 전체 pipeline 테스트
+python3 test/test_pipeline_full.py --api-url http://localhost:8011
+```
+
+#### 주요 옵션
+
+- `--job-id`: 기존 job_id 사용 (없으면 새로 생성)
+- `--tenant-id`: 테스트용 tenant_id (기본값: `pipeline_test_tenant`)
+- `--image-path`: 이미지 경로 (기본값: `pipeline_test/pipline_test_image1.png`)
+- `--text-path`: 텍스트 파일 경로 (기본값: `pipeline_test/pipline_test_txt1.txt`)
+- `--api-url`: API 서버 URL (기본값: `http://localhost:8011`)
+- `--skip-llava`: LLaVA Stage 1 건너뛰기
+- `--skip-yolo`: YOLO 건너뛰기
+- `--skip-planner`: Planner 건너뛰기
+- `--skip-overlay`: Overlay 건너뛰기
+
+#### 예시
+
+```bash
+# 전체 pipeline 테스트
+python3 test/test_pipeline_full.py
+
+# LLaVA만 건너뛰고 테스트
+python3 test/test_pipeline_full.py --skip-llava
+
+# 커스텀 이미지와 텍스트 사용
+python3 test/test_pipeline_full.py \
+  --image-path /path/to/image.png \
+  --text-path /path/to/text.txt
+
+# 기존 job_id 사용
+python3 test/test_pipeline_full.py --job-id <job_id>
+```
+
+#### Pipeline 단계
+
+1. **Job 생성**: `pipeline_test/` 폴더의 이미지와 텍스트를 DB에 저장하고 `img_gen` 완료 상태로 생성
+2. **LLaVA Stage 1**: 이미지와 광고문구 검증 (`current_step='vlm_analyze'`)
+3. **YOLO**: 금지 영역 감지 (`current_step='yolo_detect'`)
+4. **Planner**: 텍스트 오버레이 위치 제안 (`current_step='planner'`)
+5. **Overlay**: 텍스트 오버레이 적용 (`current_step='overlay'`)
+
+#### 테스트 데이터
+
+테스트 데이터는 `pipeline_test/` 폴더에 있습니다:
+- `pipline_test_image1.png`: 테스트용 이미지
+- `pipline_test_txt1.txt`: 테스트용 광고 문구
+
+자세한 내용은 `pipeline_test/README.md`를 참고하세요.
 
 ---
 
