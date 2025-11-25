@@ -25,6 +25,8 @@ from sqlalchemy import text
 import uuid
 import json
 import os
+import random
+import numpy as np
 from typing import Tuple
 from models import OverlayIn, OverlayOut
 from utils import abs_from_url, save_asset, parse_hex_rgba
@@ -739,7 +741,7 @@ def _load_font(font_paths: list, size: int) -> ImageFont.FreeTypeFont:
 
 def _select_best_proposal_with_diversity(proposals_list: list, logger) -> dict:
     """
-    위치 다양성을 고려하여 최적의 proposal 선택
+    Score 기반 동적 그룹 선택 + softmax 샘플링으로 다양성을 확보한 proposal 선택
     
     Args:
         proposals_list: proposal 리스트
@@ -794,46 +796,55 @@ def _select_best_proposal_with_diversity(proposals_list: list, logger) -> dict:
     print(f"[위치 선택 함수] 위치 그룹 분류 결과: {list(position_groups.keys())}, 각 그룹별 개수: {[(k, len(v)) for k, v in position_groups.items()]}")
     logger.info(f"[위치 선택 함수] 위치 그룹 분류 결과: {list(position_groups.keys())}, 각 그룹별 개수: {[(k, len(v)) for k, v in position_groups.items()]}")
     
-    # 각 그룹에서 최고 점수 proposal 선택
+    # 각 그룹에서 최고 점수 proposal 선택 및 그룹 점수 계산
     group_best = {}
+    group_scores = {}
+    
     for group, props in position_groups.items():
         # score가 있는 proposal만 필터링
         scored_props = [p for p in props if p.get("score") is not None]
         if scored_props:
             best = max(scored_props, key=lambda p: p.get("score", 0))
             group_best[group] = best
+            # 그룹 점수: 최고 점수 proposal의 score 사용
+            group_scores[group] = best.get("score", 0.0)
         elif props:
-            # score가 없으면 첫 번째 사용
+            # score가 없으면 첫 번째 사용하고 기본 점수 부여
             group_best[group] = props[0]
+            group_scores[group] = 0.5  # 기본 점수
+        else:
+            continue
     
     if not group_best:
         # 모든 proposal에 score가 없으면 첫 번째 사용
+        logger.warning(f"[위치 선택] 모든 proposal에 score가 없음, 첫 번째 사용")
         return proposals_list[0]
     
-    # 최종 선택: 우선순위 고려
-    # 1. max_size (최대 크기 제안) - 우선순위 최고
-    # 2. top (상단) - 일반적으로 좋은 위치
-    # 3. left, right (좌측, 우측) - 다양성 확보
-    # 4. bottom (하단) - 마지막 선택
-    # 5. center, other - 기타
+    # Softmax 샘플링을 위한 점수 정규화
+    # temperature 파라미터: 낮을수록 더 확실한 선택, 높을수록 더 다양성 확보
+    temperature = 1.0  # 기본값 (조정 가능)
     
-    priority_order = ["max_size", "top", "left", "right", "bottom", "center", "other", "unknown"]
+    groups = list(group_best.keys())
+    scores = [group_scores[g] for g in groups]
     
-    for priority_group in priority_order:
-        if priority_group in group_best:
-            selected = group_best[priority_group]
-            logger.info(f"[위치 선택] 위치 그룹 '{priority_group}'에서 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}")
-            print(f"[위치 선택] 위치 그룹 '{priority_group}'에서 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}")
-            return selected
+    # Softmax 계산
+    # 안정성을 위해 최대값을 빼서 계산 (overflow 방지)
+    scores_array = np.array(scores)
+    scores_normalized = scores_array - np.max(scores_array)  # overflow 방지
+    exp_scores = np.exp(scores_normalized / temperature)
+    probabilities = exp_scores / np.sum(exp_scores)
     
-    # fallback: score가 가장 높은 것 선택
-    scored_proposals = [p for p in proposals_list if p.get("score") is not None]
-    if scored_proposals:
-        best = max(scored_proposals, key=lambda p: p.get("score", 0))
-        logger.info(f"[위치 선택] Fallback: 최고 점수 proposal 선택: source={best.get('source')}, score={best.get('score')}")
-        return best
+    print(f"[위치 선택 함수] 그룹별 점수: {dict(zip(groups, scores))}")
+    print(f"[위치 선택 함수] 그룹별 선택 확률: {dict(zip(groups, probabilities))}")
+    logger.info(f"[위치 선택 함수] 그룹별 점수: {dict(zip(groups, scores))}")
+    logger.info(f"[위치 선택 함수] 그룹별 선택 확률: {dict(zip(groups, probabilities))}")
     
-    # 최후의 수단: 첫 번째 proposal
-    logger.info(f"[위치 선택] Fallback: 첫 번째 proposal 사용: source={proposals_list[0].get('source')}")
-    return proposals_list[0]
+    # 확률 분포에 따라 그룹 샘플링
+    selected_group = np.random.choice(groups, p=probabilities)
+    selected = group_best[selected_group]
+    
+    logger.info(f"[위치 선택] Softmax 샘플링으로 그룹 '{selected_group}' 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}, 확률={probabilities[groups.index(selected_group)]:.3f}")
+    print(f"[위치 선택] Softmax 샘플링으로 그룹 '{selected_group}' 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}, 확률={probabilities[groups.index(selected_group)]:.3f}")
+    
+    return selected
 

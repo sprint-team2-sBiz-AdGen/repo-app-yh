@@ -627,7 +627,7 @@ def main():
     parser.add_argument("--tenant-id", default="pipeline_test_tenant",
                        help="테스트용 tenant_id")
     parser.add_argument("--image-path", type=str, 
-                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_image3.jpeg"),
+                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_image4.png"),
                        help="사용할 이미지 경로")
     parser.add_argument("--text-path", type=str,
                        default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_txt1.txt"),

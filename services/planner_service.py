@@ -35,7 +35,7 @@ def propose_overlay_positions(
     min_overlay_width: float = 0.5,
     min_overlay_height: float = 0.12,
     max_proposals: int = 10,
-    max_forbidden_iou: float = 0.01  # 겹치지 않도록 엄격하게 (기존: 0.05)
+    max_forbidden_iou: float = 0.05  # 겹치지 않도록
 ) -> Dict[str, Any]:
     """
     텍스트 오버레이 위치 제안

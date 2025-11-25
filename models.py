@@ -57,7 +57,7 @@ class PlannerIn(BaseModel):
     min_overlay_width: Optional[float] = 0.5  # 최소 오버레이 너비 비율 (0-1)
     min_overlay_height: Optional[float] = 0.12  # 최소 오버레이 높이 비율 (0-1)
     max_proposals: Optional[int] = 10  # 최대 제안 개수
-    max_forbidden_iou: Optional[float] = 0.01  # 최대 허용 금지 영역 IoU (0-1) - 겹치지 않도록 엄격하게 (기존: 0.05)
+    max_forbidden_iou: Optional[float] = 0.05  # 최대 허용 금지 영역 IoU (0-1)
 
 
 class ProposalOut(BaseModel):
