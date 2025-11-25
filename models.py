@@ -143,6 +143,14 @@ class LLaVaStage1In(BaseModel):
     prompt: Optional[str] = None
 
 
+class FontRecommendation(BaseModel):
+    """폰트 추천 모델"""
+    font_style: Optional[str] = None  # "serif", "sans-serif", "bold", "italic"
+    font_size_category: Optional[str] = None  # "small", "medium", "large"
+    font_color_hex: Optional[str] = None  # hex color code (예: "FFFFFF")
+    reasoning: Optional[str] = None  # 추천 이유
+
+
 class LLaVaStage1Out(BaseModel):
     """LLaVa Stage 1 Validation 응답 모델 (DB ID 포함)"""
     job_id: str  # UUID 문자열
@@ -153,6 +161,7 @@ class LLaVaStage1Out(BaseModel):
     analysis: str
     issues: List[str]
     recommendations: List[str]
+    font_recommendation: Optional[FontRecommendation] = None  # 폰트 추천 정보
 
 
 class GPTAdCopyIn(BaseModel):

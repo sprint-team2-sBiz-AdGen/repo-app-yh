@@ -24,10 +24,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 import uuid
 import json
+import os
 from typing import Tuple
 from models import OverlayIn, OverlayOut
 from utils import abs_from_url, save_asset, parse_hex_rgba
-from database import get_db, Job, JobInput, ImageAsset, PlannerProposal, OverlayLayout
+from database import get_db, Job, JobInput, ImageAsset, PlannerProposal, OverlayLayout, VLMTrace
 import logging
 
 logger = logging.getLogger(__name__)
@@ -182,11 +183,24 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
             x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
         
-        # overlay rect
-        ol_color = parse_hex_rgba(body.overlay_color, (0, 0, 0, 0))
+        # overlay rect (배경 색상)
+        overlay_color_hex = body.overlay_color
+        logger.info(f"[Overlay 배경] 요청 파라미터: {overlay_color_hex}")
+        
+        # LLaVA 추천이 있으면 overlay_color도 추천 받을 수 있도록 (향후 확장 가능)
+        # 현재는 요청 파라미터만 사용
+        if overlay_color_hex:
+            logger.info(f"[Overlay 배경] 요청 파라미터 사용: {overlay_color_hex}")
+        else:
+            logger.info(f"[Overlay 배경] 배경 색상 없음 (투명)")
+        
+        ol_color = parse_hex_rgba(overlay_color_hex, (0, 0, 0, 0))
         if ol_color[3] > 0:
+            logger.info(f"[Overlay 배경] 배경 적용: RGBA={ol_color}")
             over = Image.new("RGBA", (pw, ph), ol_color)
             im.alpha_composite(over, dest=(x, y))
+        else:
+            logger.info(f"[Overlay 배경] 배경 없음 (투명)")
         
         # draw text
         draw = ImageDraw.Draw(im)
@@ -206,37 +220,185 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         available_width = padded_bbox[2] - padded_bbox[0]
         available_height = padded_bbox[3] - padded_bbox[1]
         
+        # Step 2.5: LLaVA 폰트 추천 조회 (vlm_traces에서)
+        font_recommendation = None
+        print(f"[폰트 추천 조회] job_id={job_id}에서 LLaVA 폰트 추천 조회 시작")
+        logger.info(f"[폰트 추천 조회] job_id={job_id}에서 LLaVA 폰트 추천 조회 시작")
+        try:
+            vlm_trace = db.query(VLMTrace).filter(
+                VLMTrace.job_id == job_id,
+                VLMTrace.provider == 'llava',
+                VLMTrace.operation_type == 'analyze'
+            ).first()
+            
+            if vlm_trace:
+                print(f"[폰트 추천 조회] vlm_trace 발견: vlm_trace_id={vlm_trace.vlm_trace_id}, response 존재={vlm_trace.response is not None}")
+                logger.info(f"[폰트 추천 조회] vlm_trace 발견: vlm_trace_id={vlm_trace.vlm_trace_id}, response 존재={vlm_trace.response is not None}")
+                if vlm_trace.response:
+                    print(f"[폰트 추천 조회] response 타입: {type(vlm_trace.response)}, response 키: {list(vlm_trace.response.keys()) if isinstance(vlm_trace.response, dict) else 'N/A'}")
+                    logger.info(f"[폰트 추천 조회] response 타입: {type(vlm_trace.response)}, response 키: {list(vlm_trace.response.keys()) if isinstance(vlm_trace.response, dict) else 'N/A'}")
+                    font_recommendation = vlm_trace.response.get('font_recommendation')
+                    if font_recommendation:
+                        print(f"[폰트 추천 조회] ✓ 폰트 추천 발견: {font_recommendation}")
+                        logger.info(f"[폰트 추천 조회] ✓ 폰트 추천 발견: {font_recommendation}")
+                    else:
+                        print(f"[폰트 추천 조회] ⚠ response에 'font_recommendation' 키가 없습니다. response 내용: {vlm_trace.response}")
+                        logger.warning(f"[폰트 추천 조회] ⚠ response에 'font_recommendation' 키가 없습니다. response 내용: {vlm_trace.response}")
+                else:
+                    print(f"[폰트 추천 조회] ⚠ vlm_trace.response가 None입니다")
+                    logger.warning(f"[폰트 추천 조회] ⚠ vlm_trace.response가 None입니다")
+            else:
+                print(f"[폰트 추천 조회] ⚠ vlm_trace를 찾을 수 없습니다 (job_id={job_id}, provider='llava', operation_type='analyze')")
+                logger.warning(f"[폰트 추천 조회] ⚠ vlm_trace를 찾을 수 없습니다 (job_id={job_id}, provider='llava', operation_type='analyze')")
+        except Exception as e:
+            print(f"[폰트 추천 조회] ❌ vlm_traces 조회 중 오류 발생: {e}")
+            logger.error(f"[폰트 추천 조회] ❌ vlm_traces 조회 중 오류 발생: {e}", exc_info=True)
+        
+        # 폰트 스타일 매핑
+        FONT_STYLE_MAP = {
+            "serif": [
+                "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSerif-Regular.otf"
+            ],
+            "sans-serif": [
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/local/lib/python3.11/site-packages/cv2/qt/fonts/DejaVuSans.ttf"
+            ],
+            "bold": [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/local/lib/python3.11/site-packages/cv2/qt/fonts/DejaVuSans-Bold.ttf"
+            ],
+            "italic": [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"
+            ]
+        }
+        
+        # 폰트 크기 카테고리 매핑
+        FONT_SIZE_MAP = {
+            "small": (12, 24),
+            "medium": (24, 48),
+            "large": (48, 96)
+        }
+        
+        # 폰트 경로 선택 (우선순위: LLaVA 추천 > 기본값)
+        font_style = None
+        if font_recommendation and font_recommendation.get('font_style'):
+            font_style = font_recommendation.get('font_style')
+            logger.info(f"[폰트 스타일] LLaVA 추천에서 추출: {font_style}")
+        else:
+            logger.info(f"[폰트 스타일] LLaVA 추천 없음 또는 font_style 없음, 기본값 사용")
+        
+        # 폰트 경로 후보 선택
+        if font_style and font_style in FONT_STYLE_MAP:
+            font_paths = FONT_STYLE_MAP[font_style]
+            logger.info(f"[폰트 스타일] ✓ LLaVA 추천 적용: {font_style}, 폰트 경로 후보: {font_paths}")
+        else:
+            # 기본 폰트 경로 (sans-serif)
+            font_paths = FONT_STYLE_MAP["sans-serif"]
+            logger.info(f"[폰트 스타일] 기본값 사용: sans-serif, 폰트 경로 후보: {font_paths}")
+        
         # 폰트 크기 범위 설정
         # 영역 크기에 따라 동적으로 조정
+        print(f"[폰트 크기 동적 조정] 영역 높이(ph)={ph}px 기반 계산")
         min_font_size = max(12, int(ph * 0.15))  # 영역 높이의 15% 또는 최소 12px
         max_font_size = min(96, int(ph * 0.4))   # 영역 높이의 40% 또는 최대 96px
+        print(f"[폰트 크기 동적 조정] 영역 기반 초기 범위: min={min_font_size}px (ph*0.15), max={max_font_size}px (ph*0.4, 최대 96px)")
+        logger.info(f"[폰트 크기] 초기 범위 (영역 기반): min={min_font_size}, max={max_font_size}, ph={ph}")
         
+        # LLaVA 추천 폰트 크기 카테고리 적용
+        if font_recommendation and font_recommendation.get('font_size_category'):
+            size_category = font_recommendation.get('font_size_category')
+            print(f"[폰트 크기 동적 조정] LLaVA 추천 카테고리: {size_category}")
+            logger.info(f"[폰트 크기] LLaVA 추천 카테고리: {size_category}")
+            if size_category in FONT_SIZE_MAP:
+                size_range = FONT_SIZE_MAP[size_category]
+                print(f"[폰트 크기 동적 조정] 카테고리 범위: {size_range[0]}-{size_range[1]}px")
+                logger.info(f"[폰트 크기] 카테고리 범위: {size_range}")
+                # 카테고리 범위와 영역 기반 범위의 교집합 사용
+                old_min, old_max = min_font_size, max_font_size
+                min_font_size = max(min_font_size, size_range[0])
+                max_font_size = min(max_font_size, size_range[1])
+                print(f"[폰트 크기 동적 조정] ✓ LLaVA 추천 적용: {old_min}-{old_max}px → {min_font_size}-{max_font_size}px (교집합)")
+                logger.info(f"[폰트 크기] ✓ LLaVA 추천 적용: {old_min}-{old_max} → {min_font_size}-{max_font_size}")
+            else:
+                print(f"[폰트 크기 동적 조정] ⚠ 알 수 없는 카테고리: {size_category}, 기본 범위 유지")
+                logger.warning(f"[폰트 크기] ⚠ 알 수 없는 카테고리: {size_category}, 기본 범위 유지")
+        else:
+            print(f"[폰트 크기 동적 조정] LLaVA 추천 없음, 기본 범위 유지")
+            logger.info(f"[폰트 크기] LLaVA 추천 없음, 기본 범위 유지")
+        
+        # 사용자 지정 크기가 있으면 우선 적용
         if body.text_size and body.text_size > 0:
             # 사용자가 지정한 크기를 최대값으로 사용하되, 범위 내에서만
+            old_max = max_font_size
             max_font_size = max(min_font_size, min(max_font_size, body.text_size))
+            logger.info(f"[폰트 크기] 사용자 지정 크기 적용: {old_max} → {max_font_size} (요청값: {body.text_size})")
         
-        logger.info(f"Font size range: min={min_font_size}, max={max_font_size}, available_height={available_height}")
-        
-        # 폰트 경로 후보
-        font_paths = [
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/local/lib/python3.11/site-packages/cv2/qt/fonts/DejaVuSans.ttf",
-            "/usr/local/lib/python3.11/site-packages/cv2/qt/fonts/DejaVuSans-Bold.ttf",
-        ]
+        print(f"[폰트 크기 동적 조정] 최종 범위: {min_font_size}-{max_font_size}px (사용 가능 높이: {available_height}px)")
+        logger.info(f"[폰트 크기] 최종 범위: min={min_font_size}, max={max_font_size}, available_height={available_height}")
         
         # 텍스트를 영역에 맞게 조정 (old/overlay.py의 _fit_text 로직)
+        print(f"[폰트 적용] 텍스트 피팅 시작: 범위=[{min_font_size}, {max_font_size}]px, 영역={available_width}x{available_height}px")
+        logger.info(f"[폰트 적용] 텍스트 피팅 시작: font_paths={font_paths}, size_range=[{min_font_size}, {max_font_size}]")
         font, wrapped_text = _fit_text(
             draw, body.text, padded_bbox, font_paths, min_font_size, max_font_size
         )
+        final_font_size = font.size if hasattr(font, 'size') else 'N/A'
+        print(f"[폰트 적용] ✓ 텍스트 피팅 완료: 최종 폰트 크기={final_font_size}px, 경로={getattr(font, 'path', '기본 폰트')}, 줄 수={len(wrapped_text.split(chr(10))) if wrapped_text else 0}")
+        logger.info(f"[폰트 적용] ✓ 텍스트 피팅 완료: font_size={final_font_size}, font_path={getattr(font, 'path', 'N/A')}, wrapped_lines={len(wrapped_text.split(chr(10))) if wrapped_text else 0}")
         
-        # 텍스트 색상
-        tc = parse_hex_rgba(body.text_color, (255, 255, 255, 255))
+        # 텍스트 색상 (우선순위: 요청 파라미터 > LLaVA 추천 > 기본값)
+        text_color_hex = body.text_color
+        logger.info(f"[폰트 색상] 요청 파라미터: {text_color_hex}")
+        if not text_color_hex or text_color_hex == "ffffffff":  # 기본값인 경우
+            logger.info(f"[폰트 색상] 기본값이므로 LLaVA 추천 확인")
+            if font_recommendation and font_recommendation.get('font_color_hex'):
+                recommended_color = font_recommendation.get('font_color_hex')
+                text_color_hex = recommended_color
+                logger.info(f"[폰트 색상] ✓ LLaVA 추천 적용: {text_color_hex}")
+            else:
+                logger.info(f"[폰트 색상] LLaVA 추천 없음, 기본값 유지: {text_color_hex}")
+        else:
+            logger.info(f"[폰트 색상] 요청 파라미터 사용 (우선순위 1): {text_color_hex}")
+        
+        tc = parse_hex_rgba(text_color_hex, (255, 255, 255, 255))
+        logger.info(f"[폰트 색상] 최종 적용 색상 (RGBA): {tc}")
         
         # 텍스트 위치 계산 (중앙 정렬)
         x_center = (padded_bbox[0] + padded_bbox[2]) / 2
         y_center = (padded_bbox[1] + padded_bbox[3]) / 2
+        
+        # 최종 적용 값 요약 로그
+        print(f"\n{'='*60}")
+        print(f"[폰트 추천 최종 적용 요약]")
+        print(f"  - 폰트 스타일: {font_style or '기본값 (sans-serif)'}")
+        print(f"  - 폰트 크기: {font.size if hasattr(font, 'size') else 'N/A'}px (범위: {min_font_size}-{max_font_size}, 영역 높이: {ph}px)")
+        print(f"  - 폰트 경로: {getattr(font, 'path', '기본 폰트')}")
+        print(f"  - 텍스트 색상: {text_color_hex} (RGBA: {tc})")
+        print(f"  - Overlay 배경 색상: {overlay_color_hex or '투명'} (RGBA: {ol_color})")
+        print(f"  - 영역 크기: {pw}x{ph}px (이미지: {w}x{h}px)")
+        print(f"  - 사용 가능한 텍스트 영역: {available_width}x{available_height}px")
+        print(f"  - LLaVA 추천 사용 여부: {'예' if font_recommendation else '아니오'}")
+        if font_recommendation:
+            print(f"  - LLaVA 추천 내용:")
+            print(f"    * Font Style: {font_recommendation.get('font_style', 'N/A')}")
+            print(f"    * Font Size Category: {font_recommendation.get('font_size_category', 'N/A')}")
+            print(f"    * Font Color: {font_recommendation.get('font_color_hex', 'N/A')}")
+            print(f"    * Reasoning: {font_recommendation.get('reasoning', 'N/A')[:100]}...")
+        print(f"{'='*60}\n")
+        logger.info(f"[폰트 추천 최종 적용 요약]")
+        logger.info(f"  - 폰트 스타일: {font_style or '기본값 (sans-serif)'}")
+        logger.info(f"  - 폰트 크기: {font.size if hasattr(font, 'size') else 'N/A'}px (범위: {min_font_size}-{max_font_size}, 영역 높이: {ph}px)")
+        logger.info(f"  - 폰트 경로: {getattr(font, 'path', '기본 폰트')}")
+        logger.info(f"  - 텍스트 색상: {text_color_hex} (RGBA: {tc})")
+        logger.info(f"  - Overlay 배경 색상: {overlay_color_hex or '투명'} (RGBA: {ol_color})")
+        logger.info(f"  - 영역 크기: {pw}x{ph}px (이미지: {w}x{h}px)")
+        logger.info(f"  - 사용 가능한 텍스트 영역: {available_width}x{available_height}px")
+        logger.info(f"  - LLaVA 추천 사용 여부: {'예' if font_recommendation else '아니오'}")
+        if font_recommendation:
+            logger.info(f"  - LLaVA 추천 내용: {font_recommendation}")
         
         # multiline_text로 그리기 (old/overlay.py 방식)
         draw.multiline_text(
@@ -251,6 +413,28 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         
         # Step 3: 오버레이된 이미지 저장
         meta = save_asset(body.tenant_id, "final", im, ".png")
+        
+        # 최종 결과물 경로 로그 출력
+        result_url = meta.get("url", "N/A")
+        try:
+            if result_url != "N/A" and result_url.startswith("/assets/"):
+                from config import ASSETS_DIR
+                result_path = os.path.join(ASSETS_DIR, result_url[len("/assets/"):])
+            else:
+                result_path = "N/A"
+        except Exception as e:
+            logger.warning(f"절대 경로 변환 실패: {e}")
+            result_path = "N/A"
+        result_filename = os.path.basename(result_path) if result_path != "N/A" else os.path.basename(result_url) if result_url != "N/A" else "N/A"
+        print(f"\n{'='*60}")
+        print(f"[최종 결과물 저장 완료]")
+        print(f"  - Asset ID: {meta.get('asset_id', 'N/A')}")
+        print(f"  - URL: {result_url}")
+        print(f"  - 절대 경로: {result_path}")
+        print(f"  - 파일명: {result_filename}")
+        print(f"  - 이미지 크기: {meta.get('width', 'N/A')}x{meta.get('height', 'N/A')}")
+        print(f"{'='*60}\n")
+        logger.info(f"[최종 결과물 저장 완료] Asset ID: {meta.get('asset_id')}, URL: {result_url}, Path: {result_path}, Size: {meta.get('width')}x{meta.get('height')}")
         
         # Step 4: overlay_layouts 테이블에 결과 저장
         overlay_id = None

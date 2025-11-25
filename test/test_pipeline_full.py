@@ -211,6 +211,18 @@ def test_llava_stage1(job_id: str, tenant_id: str, api_url: str = "http://localh
         print(f"  - Is Valid: {result.get('is_valid')}")
         print(f"  - Relevance Score: {result.get('relevance_score')}")
         
+        # 폰트 추천 확인
+        font_rec = result.get('font_recommendation')
+        if font_rec:
+            print(f"\n  폰트 추천:")
+            print(f"    - Font Style: {font_rec.get('font_style', 'N/A')}")
+            print(f"    - Font Size Category: {font_rec.get('font_size_category', 'N/A')}")
+            print(f"    - Font Color Hex: {font_rec.get('font_color_hex', 'N/A')}")
+            if font_rec.get('reasoning'):
+                print(f"    - Reasoning: {font_rec.get('reasoning')[:100]}...")
+        else:
+            print(f"\n  ⚠ 폰트 추천이 없습니다.")
+        
         return result
         
     except requests.exceptions.HTTPError as e:
@@ -406,6 +418,16 @@ def verify_db_records(db: Session, job_id: str):
             print(f"\n  VLM Traces: {len(vlm_traces)}개")
             for trace in vlm_traces:
                 print(f"    - Provider: {trace.provider}, Operation: {trace.operation_type}")
+                # 폰트 추천 확인
+                if trace.response and trace.operation_type == 'analyze':
+                    font_rec = trace.response.get('font_recommendation')
+                    if font_rec:
+                        print(f"      폰트 추천:")
+                        print(f"        - Font Style: {font_rec.get('font_style', 'N/A')}")
+                        print(f"        - Font Size Category: {font_rec.get('font_size_category', 'N/A')}")
+                        print(f"        - Font Color Hex: {font_rec.get('font_color_hex', 'N/A')}")
+                    else:
+                        print(f"      ⚠ 폰트 추천이 없습니다.")
         
         # yolo_runs 확인
         yolo_run = db.query(YOLORun).filter(YOLORun.job_id == uuid.UUID(job_id)).first()
@@ -470,10 +492,10 @@ def main():
     parser.add_argument("--tenant-id", default="pipeline_test_tenant",
                        help="테스트용 tenant_id")
     parser.add_argument("--image-path", type=str, 
-                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipline_test_image1.png"),
+                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_image3.jpeg"),
                        help="사용할 이미지 경로")
     parser.add_argument("--text-path", type=str,
-                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipline_test_txt1.txt"),
+                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_txt1.txt"),
                        help="사용할 텍스트 파일 경로")
     parser.add_argument("--api-url", default="http://localhost:8011",
                        help="API 서버 URL")
