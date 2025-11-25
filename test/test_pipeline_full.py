@@ -352,8 +352,8 @@ def test_overlay(job_id: str, tenant_id: str, proposal_id: str = None, api_url: 
         "proposal_id": proposal_id,
         "text": ad_copy_text,
         "x_align": "center",
-        "y_align": "top",
-        "text_size": 32
+        "y_align": "top"
+        # text_size 제거: 동적 폰트 크기 조정을 위해 제거
     }
     
     print(f"\n요청 URL: {url}")

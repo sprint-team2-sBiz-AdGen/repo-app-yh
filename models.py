@@ -109,7 +109,7 @@ class OverlayIn(BaseModel):
     text: str
     x_align: str = "center"
     y_align: str = "top"
-    text_size: int = 32
+    text_size: Optional[int] = None  # None이면 동적 폰트 크기 조정 사용
     overlay_color: Optional[str] = None  # "00000080"
     text_color: Optional[str] = "ffffffff"
     margin: Optional[str] = "8px"

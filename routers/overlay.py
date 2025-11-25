@@ -151,37 +151,101 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                 proposal_id_uuid = uuid.UUID(body.proposal_id)
                 proposal = db.query(PlannerProposal).filter(PlannerProposal.proposal_id == proposal_id_uuid).first()
                 if proposal and proposal.layout:
-                    # proposal의 layout에서 첫 번째 proposal 사용
                     layout = proposal.layout
                     if isinstance(layout, dict) and layout.get("proposals"):
-                        first_proposal = layout["proposals"][0] if layout["proposals"] else None
-                        if first_proposal and "xywh" in first_proposal:
-                            xywh = first_proposal["xywh"]  # [x, y, width, height] 정규화된 좌표
-                            x_ratio, y_ratio, width_ratio, height_ratio = xywh
-                            x, y, pw, ph = (int(w * x_ratio), int(h * y_ratio), int(w * width_ratio), int(h * height_ratio))
-                            logger.info(f"Using proposal layout: x={x}, y={y}, w={pw}, h={ph}")
+                        proposals_list = layout["proposals"]
+                        if proposals_list:
+                            # 여러 proposal 중에서 최적의 것 선택 (score가 높은 것 우선)
+                            # score가 없으면 첫 번째 proposal 사용
+                            best_proposal = None
+                            if len(proposals_list) > 1:
+                                # score가 있는 proposal 중에서 최고 점수 선택
+                                scored_proposals = [p for p in proposals_list if p.get("score") is not None]
+                                if scored_proposals:
+                                    best_proposal = max(scored_proposals, key=lambda p: p.get("score", 0))
+                                    logger.info(f"Selected best proposal by score: score={best_proposal.get('score')}, source={best_proposal.get('source')}")
+                                else:
+                                    # score가 없으면 첫 번째 proposal 사용
+                                    best_proposal = proposals_list[0]
+                                    logger.info(f"No scored proposals, using first proposal: source={best_proposal.get('source')}")
+                            else:
+                                best_proposal = proposals_list[0]
+                                logger.info(f"Using single proposal: source={best_proposal.get('source')}")
+                            
+                            if best_proposal and "xywh" in best_proposal:
+                                xywh = best_proposal["xywh"]  # [x, y, width, height] 정규화된 좌표
+                                x_ratio, y_ratio, width_ratio, height_ratio = xywh
+                                x, y, pw, ph = (int(w * x_ratio), int(h * y_ratio), int(w * width_ratio), int(h * height_ratio))
+                                print(f"[위치 선택] 최적 proposal 선택: x={x}, y={y}, w={pw}, h={ph}, source={best_proposal.get('source', 'N/A')}, score={best_proposal.get('score', 'N/A')}")
+                                logger.info(f"Using best proposal layout: x={x}, y={y}, w={pw}, h={ph}, source={best_proposal.get('source')}, score={best_proposal.get('score')}")
+                            else:
+                                logger.warning(f"Best proposal has no xywh, using default layout")
+                                proposal_id_uuid = None
+                                x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                         else:
-                            # proposal 정보가 없으면 기본값 사용
-                            logger.warning(f"Proposal layout has no valid proposals, using default layout")
-                            proposal_id_uuid = None  # proposal이 유효하지 않으므로 None으로 설정
+                            logger.warning(f"Proposal layout has no proposals, using default layout")
+                            proposal_id_uuid = None
                             x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                     else:
                         logger.warning(f"Proposal layout is invalid, using default layout")
-                        proposal_id_uuid = None  # proposal이 유효하지 않으므로 None으로 설정
+                        proposal_id_uuid = None
                         x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                 else:
-                    # proposal을 찾지 못했거나 layout이 없음
                     logger.warning(f"Proposal not found or has no layout: proposal_id={body.proposal_id}, using default layout")
-                    proposal_id_uuid = None  # proposal을 찾지 못했으므로 None으로 설정
+                    proposal_id_uuid = None
                     x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
             except ValueError:
                 logger.warning(f"Invalid proposal_id format: {body.proposal_id}, using default layout")
-                proposal_id_uuid = None  # 잘못된 형식이므로 None으로 설정
+                proposal_id_uuid = None
                 x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
         else:
-            # default proposal region
-            x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
-            x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
+            # proposal_id가 없으면 job_id로 최신 proposal 찾기
+            try:
+                job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
+                if job_input and job_input.img_asset_id:
+                    # 같은 image_asset_id를 가진 최신 proposal 찾기
+                    latest_proposal = db.query(PlannerProposal).filter(
+                        PlannerProposal.image_asset_id == job_input.img_asset_id
+                    ).order_by(PlannerProposal.created_at.desc()).first()
+                    
+                    if latest_proposal and latest_proposal.layout:
+                        layout = latest_proposal.layout
+                        if isinstance(layout, dict) and layout.get("proposals"):
+                            proposals_list = layout["proposals"]
+                            if proposals_list:
+                                # score가 높은 proposal 선택
+                                scored_proposals = [p for p in proposals_list if p.get("score") is not None]
+                                if scored_proposals:
+                                    best_proposal = max(scored_proposals, key=lambda p: p.get("score", 0))
+                                else:
+                                    best_proposal = proposals_list[0]
+                                
+                                if best_proposal and "xywh" in best_proposal:
+                                    xywh = best_proposal["xywh"]
+                                    x_ratio, y_ratio, width_ratio, height_ratio = xywh
+                                    x, y, pw, ph = (int(w * x_ratio), int(h * y_ratio), int(w * width_ratio), int(h * height_ratio))
+                                    proposal_id_uuid = latest_proposal.proposal_id
+                                    print(f"[위치 선택] job_id로 최신 proposal 자동 선택: x={x}, y={y}, w={pw}, h={ph}, source={best_proposal.get('source', 'N/A')}")
+                                    logger.info(f"Auto-selected latest proposal from job_id: x={x}, y={y}, w={pw}, h={ph}, proposal_id={proposal_id_uuid}")
+                                else:
+                                    x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
+                                    x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
+                            else:
+                                x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
+                                x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
+                        else:
+                            x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
+                            x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
+                    else:
+                        x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
+                        x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
+                else:
+                    x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
+                    x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
+            except Exception as e:
+                logger.warning(f"Failed to auto-select proposal from job_id: {e}, using default layout")
+                x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
+                x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
         
         # overlay rect (배경 색상)
         overlay_color_hex = body.overlay_color
@@ -299,41 +363,38 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             font_paths = FONT_STYLE_MAP["sans-serif"]
             logger.info(f"[폰트 스타일] 기본값 사용: sans-serif, 폰트 경로 후보: {font_paths}")
         
-        # 폰트 크기 범위 설정
-        # 영역 크기에 따라 동적으로 조정
-        print(f"[폰트 크기 동적 조정] 영역 높이(ph)={ph}px 기반 계산")
-        min_font_size = max(12, int(ph * 0.15))  # 영역 높이의 15% 또는 최소 12px
-        max_font_size = min(96, int(ph * 0.4))   # 영역 높이의 40% 또는 최대 96px
-        print(f"[폰트 크기 동적 조정] 영역 기반 초기 범위: min={min_font_size}px (ph*0.15), max={max_font_size}px (ph*0.4, 최대 96px)")
-        logger.info(f"[폰트 크기] 초기 범위 (영역 기반): min={min_font_size}, max={max_font_size}, ph={ph}")
+        # 폰트 크기 범위 설정 (이전 코드처럼 넓은 범위 사용)
+        # 이전 코드: min=28, max=96 (68px 범위)
+        # LLaVA 추천은 가이드로만 사용 (교집합 대신)
+        min_font_size = 28  # 이전 코드와 동일
+        max_font_size = 96  # 이전 코드와 동일
+        print(f"[폰트 크기 동적 조정] 이전 코드 방식: min={min_font_size}px, max={max_font_size}px (넓은 범위)")
+        logger.info(f"[폰트 크기] 초기 범위 (이전 코드 방식): min={min_font_size}, max={max_font_size}")
         
-        # LLaVA 추천 폰트 크기 카테고리 적용
+        # LLaVA 추천 폰트 크기 카테고리 (가이드로만 사용, 범위 제한하지 않음)
         if font_recommendation and font_recommendation.get('font_size_category'):
             size_category = font_recommendation.get('font_size_category')
-            print(f"[폰트 크기 동적 조정] LLaVA 추천 카테고리: {size_category}")
-            logger.info(f"[폰트 크기] LLaVA 추천 카테고리: {size_category}")
+            print(f"[폰트 크기 동적 조정] LLaVA 추천 카테고리 (참고용): {size_category}")
+            logger.info(f"[폰트 크기] LLaVA 추천 카테고리 (참고용): {size_category}")
             if size_category in FONT_SIZE_MAP:
                 size_range = FONT_SIZE_MAP[size_category]
-                print(f"[폰트 크기 동적 조정] 카테고리 범위: {size_range[0]}-{size_range[1]}px")
-                logger.info(f"[폰트 크기] 카테고리 범위: {size_range}")
-                # 카테고리 범위와 영역 기반 범위의 교집합 사용
-                old_min, old_max = min_font_size, max_font_size
-                min_font_size = max(min_font_size, size_range[0])
-                max_font_size = min(max_font_size, size_range[1])
-                print(f"[폰트 크기 동적 조정] ✓ LLaVA 추천 적용: {old_min}-{old_max}px → {min_font_size}-{max_font_size}px (교집합)")
-                logger.info(f"[폰트 크기] ✓ LLaVA 추천 적용: {old_min}-{old_max} → {min_font_size}-{max_font_size}")
+                print(f"[폰트 크기 동적 조정] LLaVA 추천 범위 (참고): {size_range[0]}-{size_range[1]}px")
+                logger.info(f"[폰트 크기] LLaVA 추천 범위 (참고): {size_range}")
+                # LLaVA 추천은 가이드로만 사용, 범위는 제한하지 않음
+                # _fit_text 함수에서 넓은 범위(28-96px) 내에서 최적 크기 선택
             else:
-                print(f"[폰트 크기 동적 조정] ⚠ 알 수 없는 카테고리: {size_category}, 기본 범위 유지")
-                logger.warning(f"[폰트 크기] ⚠ 알 수 없는 카테고리: {size_category}, 기본 범위 유지")
+                print(f"[폰트 크기 동적 조정] ⚠ 알 수 없는 카테고리: {size_category}, 기본 범위 사용")
+                logger.warning(f"[폰트 크기] ⚠ 알 수 없는 카테고리: {size_category}, 기본 범위 사용")
         else:
-            print(f"[폰트 크기 동적 조정] LLaVA 추천 없음, 기본 범위 유지")
-            logger.info(f"[폰트 크기] LLaVA 추천 없음, 기본 범위 유지")
+            print(f"[폰트 크기 동적 조정] LLaVA 추천 없음, 기본 범위 사용")
+            logger.info(f"[폰트 크기] LLaVA 추천 없음, 기본 범위 사용")
         
-        # 사용자 지정 크기가 있으면 우선 적용
+        # 사용자 지정 크기가 있으면 우선 적용 (하지만 넓은 범위 내에서)
         if body.text_size and body.text_size > 0:
-            # 사용자가 지정한 크기를 최대값으로 사용하되, 범위 내에서만
+            # 사용자가 지정한 크기를 최대값으로 사용하되, 넓은 범위(28-96px) 내에서만
             old_max = max_font_size
             max_font_size = max(min_font_size, min(max_font_size, body.text_size))
+            print(f"[폰트 크기 동적 조정] 사용자 지정 크기 적용: {old_max}px → {max_font_size}px (요청값: {body.text_size}px)")
             logger.info(f"[폰트 크기] 사용자 지정 크기 적용: {old_max} → {max_font_size} (요청값: {body.text_size})")
         
         print(f"[폰트 크기 동적 조정] 최종 범위: {min_font_size}-{max_font_size}px (사용 가능 높이: {available_height}px)")
