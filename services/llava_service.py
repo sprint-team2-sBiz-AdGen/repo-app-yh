@@ -225,23 +225,46 @@ def recommend_font(
     Returns:
         폰트 추천 딕셔너리 또는 None
     """
+    # 한글 텍스트 감지
+    has_korean = False
+    if ad_copy_text:
+        import re
+        korean_pattern = re.compile(r'[가-힣]')
+        has_korean = bool(korean_pattern.search(ad_copy_text))
+    
+    # 한글 폰트 안내 추가 (fonts.py에서 가져옴)
+    from fonts import get_korean_font_note, get_font_name_list_for_llava
+    
+    korean_font_note = ""
+    if has_korean:
+        korean_font_note = get_korean_font_note()
+    
     # 폰트 추천 프롬프트
     font_recommendation_prompt = f"""Based on the image analysis and ad copy, recommend the best font style, size, and color for text overlay on this advertisement image.
 
 ## Context
 {f"Image Analysis: {image_analysis}" if image_analysis else "Analyze the image first."}
 {f"Ad Copy: {ad_copy_text}" if ad_copy_text else ""}
+{korean_font_note}
 
 ## Task
 Recommend font properties for text overlay that will:
 1. Match the image mood and style (formal/casual/playful/elegant)
 2. Ensure good contrast with the background
 3. Be appropriate for the ad copy tone
+{"4. Support Korean characters well (if Korean text is present)" if has_korean else ""}
+
+IMPORTANT - Font Selection Diversity:
+- Consider MULTIPLE suitable fonts from the available list, not just one
+- Different fonts can work well for the same image - choose based on subtle nuances
+- Vary your recommendations: consider different font personalities (friendly, elegant, bold, playful, etc.)
+- If multiple fonts could work, choose the one that adds the most character or uniqueness
 
 ## Output Format (JSON)
 Provide your recommendation in this exact JSON format:
 {{
   "font_style": "sans-serif",  // Choose: "serif", "sans-serif", "bold", "italic"
+  "font_name": "Pretendard GOV",  // Specific font name (e.g., "Pretendard GOV", "Gmarket Sans", "Nanum Gothic", "Nanum Myeongjo", "Baemin Dohyeon", "Baemin Euljiro", or leave empty for auto-selection)
   "font_size_category": "medium",  // Choose: "small", "medium", "large"
   "font_color_hex": "FFFFFF",  // Hex color code (without #), recommend based on background contrast
   "reasoning": "Brief explanation of why these choices fit the image and ad copy"
@@ -249,14 +272,25 @@ Provide your recommendation in this exact JSON format:
 
 IMPORTANT:
 - font_style must be one of: "serif", "sans-serif", "bold", "italic"
+- font_name: RECOMMEND a specific font name that best matches the image and ad copy style. Available fonts:
+{get_font_name_list_for_llava() if has_korean else '  * For English text: leave empty or use generic names like "Arial", "Helvetica"'}
 - font_size_category must be one of: "small", "medium", "large"
 - font_color_hex must be a 6-character hex code (e.g., "FFFFFF" for white, "000000" for black)
 - Consider background colors: if background is dark, use light text; if light, use dark text
 - Match font style to image mood: formal images → serif, casual → sans-serif, bold → bold
+{"- For Korean text: STRONGLY RECOMMEND a specific font name from the list above based on the image mood and ad copy tone" if has_korean else ""}
+- DIVERSITY: When multiple fonts could work, choose different ones to add variety and character
+- Consider the unique personality of each font: Gmarket Sans (friendly), Jalnan (bold), Cafe24 Classictype (elegant), DdangFonts (distinctive), etc.
 """
     
     try:
-        response = process_image_with_llava(image, font_recommendation_prompt)
+        # 폰트 추천은 다양성을 위해 temperature를 높이고 샘플링 활성화
+        response = process_image_with_llava(
+            image, 
+            font_recommendation_prompt,
+            temperature=0.7,  # 다양성을 위해 temperature 증가 (기본값 0.1 → 0.7)
+            do_sample=True   # 샘플링 활성화 (기본값 False → True)
+        )
         
         # JSON 응답 파싱 시도
         font_recommendation = None
@@ -315,6 +349,31 @@ IMPORTANT:
                 color_match = re.search(r'([A-Fa-f0-9]{6})', response)
             if color_match:
                 font_recommendation['font_color_hex'] = color_match.group(1).upper()
+            
+            # font_name 추출
+            name_match = re.search(r'"font_name"[:\s]+"([^"]+)"', response, re.IGNORECASE)
+            if not name_match:
+                name_match = re.search(r'font[_\s]name[:\s]+([^\n,]+)', response, re.IGNORECASE)
+            if not name_match:
+                # reasoning에서 폰트 이름 추출 시도 (예: "Gmarket Sans is a friendly...")
+                reasoning_text = font_recommendation.get('reasoning', '') or response
+                # Pass 폴더의 폰트 이름 패턴 매칭
+                pass_font_names = [
+                    "Gmarket Sans", "Gmarket Sans Bold", "Gmarket Sans Medium",
+                    "Baemin Dohyeon", "Baemin Euljiro",
+                    "Pretendard GOV Bold", "Pretendard Bold",
+                    "Nanum Gothic Bold",
+                    "Cafe24 Classictype", "Cafe24 Danjunghae", "Cafe24 Ssurround", "Cafe24 Supermagic",
+                    "Jalnan", "Jalnan Gothic",
+                    "DdangFonts", "DdangFonts Light", "DdangFonts Medium", "DdangFonts Bold"
+                ]
+                for font_name in pass_font_names:
+                    if font_name.lower() in reasoning_text.lower():
+                        font_recommendation['font_name'] = font_name
+                        print(f"[폰트 이름 추출] reasoning에서 발견: {font_name}")
+                        break
+            if name_match:
+                font_recommendation['font_name'] = name_match.group(1).strip()
             
             # reasoning 추출
             reasoning_match = re.search(r'"reasoning"[:\s]+"([^"]+)"', response, re.IGNORECASE | re.DOTALL)

@@ -31,6 +31,7 @@ from typing import Tuple
 from models import OverlayIn, OverlayOut
 from utils import abs_from_url, save_asset, parse_hex_rgba
 from database import get_db, Job, JobInput, ImageAsset, PlannerProposal, OverlayLayout, VLMTrace
+from fonts import FONT_STYLE_MAP, FONT_NAME_MAP, FONT_SIZE_MAP
 import logging
 
 logger = logging.getLogger(__name__)
@@ -302,50 +303,57 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             print(f"[폰트 추천 조회] ❌ vlm_traces 조회 중 오류 발생: {e}")
             logger.error(f"[폰트 추천 조회] ❌ vlm_traces 조회 중 오류 발생: {e}", exc_info=True)
         
-        # 폰트 스타일 매핑
-        FONT_STYLE_MAP = {
-            "serif": [
-                "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-                "/usr/share/fonts/truetype/noto/NotoSerif-Regular.otf"
-            ],
-            "sans-serif": [
-                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                "/usr/local/lib/python3.11/site-packages/cv2/qt/fonts/DejaVuSans.ttf"
-            ],
-            "bold": [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                "/usr/local/lib/python3.11/site-packages/cv2/qt/fonts/DejaVuSans-Bold.ttf"
-            ],
-            "italic": [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"
-            ]
-        }
+        # 폰트 매핑은 fonts.py에서 import하여 사용
         
-        # 폰트 크기 카테고리 매핑
-        FONT_SIZE_MAP = {
-            "small": (12, 24),
-            "medium": (24, 48),
-            "large": (48, 96)
-        }
-        
-        # 폰트 경로 선택 (우선순위: LLaVA 추천 > 기본값)
+        # 폰트 경로 선택: LLaVA 추천 폰트를 직접 사용 (우선순위 없음)
         font_style = None
-        if font_recommendation and font_recommendation.get('font_style'):
-            font_style = font_recommendation.get('font_style')
-            logger.info(f"[폰트 스타일] LLaVA 추천에서 추출: {font_style}")
-        else:
-            logger.info(f"[폰트 스타일] LLaVA 추천 없음 또는 font_style 없음, 기본값 사용")
+        font_name = None
         
-        # 폰트 경로 후보 선택
-        if font_style and font_style in FONT_STYLE_MAP:
-            font_paths = FONT_STYLE_MAP[font_style]
-            logger.info(f"[폰트 스타일] ✓ LLaVA 추천 적용: {font_style}, 폰트 경로 후보: {font_paths}")
+        # 요청 파라미터에서 font_name 확인
+        if body.font_name:
+            font_name = body.font_name
+            logger.info(f"[폰트 추천] 요청 파라미터에서 font_name 지정: {font_name}")
+        elif font_recommendation:
+            # LLaVA 추천 폰트 사용 (우선순위 없음, 추천하는 폰트를 직접 사용)
+            font_name = font_recommendation.get('font_name')
+            font_style = font_recommendation.get('font_style')
+            logger.info(f"[폰트 추천] LLaVA 추천: font_name={font_name}, font_style={font_style}")
         else:
-            # 기본 폰트 경로 (sans-serif)
-            font_paths = FONT_STYLE_MAP["sans-serif"]
-            logger.info(f"[폰트 스타일] 기본값 사용: sans-serif, 폰트 경로 후보: {font_paths}")
+            logger.info(f"[폰트 추천] LLaVA 추천 없음, 기본값 사용")
+        
+        # LLaVA가 추천한 폰트 이름을 직접 사용 (우선순위 없음)
+        font_paths = None
+        if font_name:
+            font_name_lower = font_name.lower().strip()
+            # 정확한 매칭 시도
+            if font_name_lower in FONT_NAME_MAP:
+                recommended_path = FONT_NAME_MAP[font_name_lower]
+                font_paths = [recommended_path]
+                logger.info(f"[폰트 추천] ✓ LLaVA 추천 폰트 이름 사용: {font_name} -> {recommended_path}")
+            else:
+                # 부분 매칭 시도
+                matched_path = None
+                for name_key, path in FONT_NAME_MAP.items():
+                    if name_key in font_name_lower or font_name_lower in name_key:
+                        matched_path = path
+                        break
+                
+                if matched_path:
+                    font_paths = [matched_path]
+                    logger.info(f"[폰트 추천] ✓ LLaVA 추천 폰트 이름 부분 매칭: {font_name} -> {matched_path}")
+                else:
+                    logger.warning(f"[폰트 추천] ⚠ LLaVA 추천 폰트 이름을 찾을 수 없음: {font_name}, font_style 기반으로 폴백")
+        
+        # font_name이 없거나 매칭 실패 시 font_style 기반으로 선택 (fallback, 우선순위 없음)
+        if not font_paths:
+            if font_style and font_style in FONT_STYLE_MAP:
+                # font_style 기반으로 선택하되, 리스트 순서는 fallback용 (우선순위 아님)
+                font_paths = FONT_STYLE_MAP[font_style]
+                logger.info(f"[폰트 추천] LLaVA 추천 font_style 사용 (fallback): {font_style}, 폰트 경로 후보: {len(font_paths)}개")
+            else:
+                # 기본 폰트 경로 (sans-serif, fallback)
+                font_paths = FONT_STYLE_MAP["sans-serif"]
+                logger.info(f"[폰트 추천] 기본값 사용 (fallback): sans-serif, 폰트 경로 후보: {len(font_paths)}개")
         
         # 폰트 크기 범위 설정 (이전 코드처럼 넓은 범위 사용)
         # 이전 코드: min=28, max=96 (68px 범위)
@@ -418,6 +426,7 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         # 최종 적용 값 요약 로그
         print(f"\n{'='*60}")
         print(f"[폰트 추천 최종 적용 요약]")
+        print(f"  - LLaVA 추천 폰트 이름: {font_name or 'N/A'}")
         print(f"  - 폰트 스타일: {font_style or '기본값 (sans-serif)'}")
         print(f"  - 폰트 크기: {font.size if hasattr(font, 'size') else 'N/A'}px (범위: {min_font_size}-{max_font_size}, 영역 높이: {ph}px)")
         print(f"  - 폰트 경로: {getattr(font, 'path', '기본 폰트')}")
@@ -428,12 +437,14 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         print(f"  - LLaVA 추천 사용 여부: {'예' if font_recommendation else '아니오'}")
         if font_recommendation:
             print(f"  - LLaVA 추천 내용:")
+            print(f"    * Font Name: {font_recommendation.get('font_name', 'N/A')}")
             print(f"    * Font Style: {font_recommendation.get('font_style', 'N/A')}")
             print(f"    * Font Size Category: {font_recommendation.get('font_size_category', 'N/A')}")
             print(f"    * Font Color: {font_recommendation.get('font_color_hex', 'N/A')}")
             print(f"    * Reasoning: {font_recommendation.get('reasoning', 'N/A')[:100]}...")
         print(f"{'='*60}\n")
         logger.info(f"[폰트 추천 최종 적용 요약]")
+        logger.info(f"  - LLaVA 추천 폰트 이름: {font_name or 'N/A'}")
         logger.info(f"  - 폰트 스타일: {font_style or '기본값 (sans-serif)'}")
         logger.info(f"  - 폰트 크기: {font.size if hasattr(font, 'size') else 'N/A'}px (범위: {min_font_size}-{max_font_size}, 영역 높이: {ph}px)")
         logger.info(f"  - 폰트 경로: {getattr(font, 'path', '기본 폰트')}")

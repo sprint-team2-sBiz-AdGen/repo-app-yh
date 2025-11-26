@@ -113,6 +113,7 @@ class OverlayIn(BaseModel):
     overlay_color: Optional[str] = None  # "00000080"
     text_color: Optional[str] = "ffffffff"
     margin: Optional[str] = "8px"
+    font_name: Optional[str] = None  # 강제로 사용할 폰트 이름 (예: "Gmarket Sans", "Pretendard GOV", "Nanum Gothic", "Baemin Dohyeon")
 
 
 class OverlayOut(BaseModel):
@@ -146,6 +147,7 @@ class LLaVaStage1In(BaseModel):
 class FontRecommendation(BaseModel):
     """폰트 추천 모델"""
     font_style: Optional[str] = None  # "serif", "sans-serif", "bold", "italic"
+    font_name: Optional[str] = None  # 구체적인 폰트 이름 (예: "Pretendard GOV", "Gmarket Sans", "Nanum Gothic", "Nanum Myeongjo", "Baemin Dohyeon", "Baemin Euljiro")
     font_size_category: Optional[str] = None  # "small", "medium", "large"
     font_color_hex: Optional[str] = None  # hex color code (예: "FFFFFF")
     reasoning: Optional[str] = None  # 추천 이유
