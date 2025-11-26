@@ -262,6 +262,16 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             )
         
         # Step 10: 응답 반환
+        # font_recommendation 딕셔너리를 FontRecommendation 모델로 변환
+        font_rec_dict = result.get('font_recommendation')
+        font_recommendation = None
+        if font_rec_dict:
+            from models import FontRecommendation
+            try:
+                font_recommendation = FontRecommendation(**font_rec_dict)
+            except Exception as e:
+                logger.warning(f"Failed to parse font recommendation: {e}")
+        
         return LLaVaStage1Out(
             job_id=body.job_id,  # 요청에서 받은 job_id 그대로 반환
             vlm_trace_id=str(vlm_trace_id),
@@ -270,7 +280,8 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             relevance_score=result.get('relevance_score'),
             analysis=result.get('analysis', ''),
             issues=result.get('issues', []),
-            recommendations=result.get('recommendations', [])
+            recommendations=result.get('recommendations', []),
+            font_recommendation=font_recommendation
         )
     
     except HTTPException:

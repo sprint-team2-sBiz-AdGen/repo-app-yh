@@ -25,3 +25,9 @@ __init__.py
 # Ignore test artifacts in output/
 test/output/*.json
 test/output/*.png
+
+korfont_test/
+pipeline_test/
+old/
+*.ttf
+*.otf

@@ -35,7 +35,7 @@ def propose_overlay_positions(
     min_overlay_width: float = 0.5,
     min_overlay_height: float = 0.12,
     max_proposals: int = 10,
-    max_forbidden_iou: float = 0.05
+    max_forbidden_iou: float = 0.05  # 겹치지 않도록
 ) -> Dict[str, Any]:
     """
     텍스트 오버레이 위치 제안
@@ -78,17 +78,20 @@ def propose_overlay_positions(
             mask_array = np.array(forbidden_mask)
     
     # 여러 위치 후보 생성 (금지 영역을 제외한 영역에서)
+    logger.info(f"[Planner] 후보 생성 시작: w={w}, h={h}, avoid_regions={len(avoid_regions) if avoid_regions else 0}, mask_array={mask_array is not None}")
     candidates = _generate_position_candidates(
         w, h,
         avoid_regions,
         mask_array,
         min_overlay_width,
         min_overlay_height,
-        max_proposals * 5  # 더 많은 후보 생성 후 필터링 (10개 제안을 위해 더 많이 생성)
+        max_proposals * 10  # 더 많은 후보 생성 후 필터링 (금지 영역을 피하기 위해 더 많이 생성)
     )
     
     # 각 후보에 대해 IoU 계산 및 필터링
     valid_proposals = []
+    logger.info(f"[Planner] 생성된 candidates 개수: {len(candidates)}")
+    print(f"[Planner] 생성된 candidates 개수: {len(candidates)}")
     for candidate in candidates:
         x, y, width, height = candidate["xywh"]
         
@@ -105,6 +108,31 @@ def propose_overlay_positions(
             candidate["occlusion_iou"] = occlusion_iou
             candidate["score"] = candidate.get("score", 1.0) * (1.0 - occlusion_iou)  # 겹침이 적을수록 높은 점수
             valid_proposals.append(candidate)
+    
+    logger.info(f"[Planner] valid_proposals 개수: {len(valid_proposals)} (max_forbidden_iou={max_forbidden_iou})")
+    print(f"[Planner] valid_proposals 개수: {len(valid_proposals)} (max_forbidden_iou={max_forbidden_iou})")
+    
+    # valid_proposals가 0개이면 fallback: IoU가 가장 낮은 candidate 사용 (하지만 max_forbidden_iou보다 작은 것만)
+    if len(valid_proposals) == 0 and len(candidates) > 0:
+        logger.warning(f"[Planner] 모든 candidate가 필터링됨 (max_forbidden_iou={max_forbidden_iou}). IoU가 가장 낮은 candidate를 fallback으로 사용")
+        print(f"[Planner] 모든 candidate가 필터링됨 (max_forbidden_iou={max_forbidden_iou}). IoU가 가장 낮은 candidate를 fallback으로 사용")
+        # 각 candidate의 IoU 계산
+        candidate_ious = []
+        for candidate in candidates:
+            x, y, width, height = candidate["xywh"]
+            iou = _compute_forbidden_iou(x, y, width, height, avoid_regions, mask_array, w, h)
+            candidate_ious.append((candidate, iou))
+        # IoU가 가장 낮은 candidate 선택 (하지만 가능하면 IoU가 0.0에 가까운 것)
+        candidate_ious.sort(key=lambda x: x[1])
+        best_candidate, best_iou = candidate_ious[0]
+        if best_iou > 0.1:
+            logger.warning(f"[Planner] Fallback candidate도 IoU가 높음 ({best_iou}). 금지 영역과 겹칠 수 있습니다.")
+            print(f"[Planner] Fallback candidate도 IoU가 높음 ({best_iou}). 금지 영역과 겹칠 수 있습니다.")
+        best_candidate["occlusion_iou"] = best_iou
+        best_candidate["score"] = best_candidate.get("score", 1.0) * (1.0 - best_iou)
+        valid_proposals.append(best_candidate)
+        logger.info(f"[Planner] Fallback candidate 선택: source={best_candidate.get('source')}, IoU={best_iou}")
+        print(f"[Planner] Fallback candidate 선택: source={best_candidate.get('source')}, IoU={best_iou}")
     
     # 크기별로 그룹화하여 다양성 확보
     proposals = []
@@ -174,6 +202,8 @@ def propose_overlay_positions(
     # 제안 개수 제한 (최대 크기 제안을 위해 1개 여유)
     proposals = proposals[:max_proposals]
     
+    logger.info(f"[Planner] 크기 그룹화 후 proposals 개수: {len(proposals)}")
+    
     # 추가: 금지 영역과 겹치지 않는 최대 크기 제안
     max_size_proposal = _find_max_size_proposal(
         w, h,
@@ -189,9 +219,14 @@ def propose_overlay_positions(
         proposals.insert(0, max_size_proposal)
         # 총 개수는 max_proposals + 1 (최대 크기 포함)
         proposals = proposals[:max_proposals + 1]
+        logger.info(f"[Planner] max_size_proposal 추가 후 proposals 개수: {len(proposals)}")
+    else:
+        logger.warning(f"[Planner] max_size_proposal을 찾지 못했습니다")
     
     # avoid 영역 (첫 번째 금지 영역 또는 None)
     avoid = avoid_regions[0] if avoid_regions else None
+    
+    logger.info(f"[Planner] 최종 반환 proposals 개수: {len(proposals)}")
     
     return {
         "proposals": proposals,

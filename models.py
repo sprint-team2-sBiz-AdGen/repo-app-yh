@@ -79,7 +79,7 @@ class PlannerOut(BaseModel):
     min_overlay_width: Optional[float] = 0.5  # 최소 오버레이 너비 비율 (0-1)
     min_overlay_height: Optional[float] = 0.12  # 최소 오버레이 높이 비율 (0-1)
     max_proposals: Optional[int] = 10  # 최대 제안 개수
-    max_forbidden_iou: Optional[float] = 0.05  # 최대 허용 금지 영역 IoU (0-1)
+    max_forbidden_iou: Optional[float] = 0.01  # 최대 허용 금지 영역 IoU (0-1) - 겹치지 않도록 엄격하게 (기존: 0.05)
 
 
 class ProposalOut(BaseModel):
@@ -109,10 +109,11 @@ class OverlayIn(BaseModel):
     text: str
     x_align: str = "center"
     y_align: str = "top"
-    text_size: int = 32
+    text_size: Optional[int] = None  # None이면 동적 폰트 크기 조정 사용
     overlay_color: Optional[str] = None  # "00000080"
     text_color: Optional[str] = "ffffffff"
     margin: Optional[str] = "8px"
+    font_name: Optional[str] = None  # 강제로 사용할 폰트 이름 (예: "Gmarket Sans", "Pretendard GOV", "Nanum Gothic", "Baemin Dohyeon")
 
 
 class OverlayOut(BaseModel):
@@ -143,6 +144,15 @@ class LLaVaStage1In(BaseModel):
     prompt: Optional[str] = None
 
 
+class FontRecommendation(BaseModel):
+    """폰트 추천 모델"""
+    font_style: Optional[str] = None  # "serif", "sans-serif", "bold", "italic"
+    font_name: Optional[str] = None  # 구체적인 폰트 이름 (예: "Pretendard GOV", "Gmarket Sans", "Nanum Gothic", "Nanum Myeongjo", "Baemin Dohyeon", "Baemin Euljiro")
+    font_size_category: Optional[str] = None  # "small", "medium", "large"
+    font_color_hex: Optional[str] = None  # hex color code (예: "FFFFFF")
+    reasoning: Optional[str] = None  # 추천 이유
+
+
 class LLaVaStage1Out(BaseModel):
     """LLaVa Stage 1 Validation 응답 모델 (DB ID 포함)"""
     job_id: str  # UUID 문자열
@@ -153,6 +163,7 @@ class LLaVaStage1Out(BaseModel):
     analysis: str
     issues: List[str]
     recommendations: List[str]
+    font_recommendation: Optional[FontRecommendation] = None  # 폰트 추천 정보
 
 
 class GPTAdCopyIn(BaseModel):
