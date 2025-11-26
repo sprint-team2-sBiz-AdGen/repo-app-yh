@@ -24,11 +24,14 @@
 
 import os
 import re
+import logging
 from typing import Optional, Dict, Any
 from PIL import Image
 import torch
 from transformers import LlavaProcessor, LlavaForConditionalGeneration
 from config import LLAVA_MODEL_NAME, DEVICE_TYPE, MODEL_DIR, USE_QUANTIZATION
+
+logger = logging.getLogger(__name__)
 
 # 디바이스 설정
 DEVICE = DEVICE_TYPE if DEVICE_TYPE == "cuda" and torch.cuda.is_available() else "cpu"
@@ -696,7 +699,15 @@ def judge_final_ad(
 - "occlusion" should be true if any text or important content is blocked/occluded, false otherwise
 - Provide your response as valid JSON only."""
     
+    # GPU 메모리 정리 후 실행
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+    
     response = process_image_with_llava(image, judge_prompt, max_new_tokens=512, temperature=0.7, do_sample=True)
+    
+    # GPU 메모리 정리
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
     
     # JSON 파싱 시도
     result = _parse_judge_response(response)
@@ -722,14 +733,18 @@ def _parse_judge_response(response: str) -> Dict[str, Any]:
         json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response, re.DOTALL)
         if json_match:
             json_str = json_match.group(0)
+            
+            # 이스케이프된 언더스코어를 일반 언더스코어로 변환 (LLaVA가 "on\_brief"로 반환하는 경우 대비)
+            json_str = json_str.replace('\\_', '_')
+            
             parsed = json.loads(json_str)
             
-            # 필수 필드 확인 및 기본값 설정
+            # 필수 필드 확인 및 기본값 설정 (이스케이프된 키와 일반 키 모두 시도)
             result = {
-                "on_brief": parsed.get("on_brief", False),
+                "on_brief": parsed.get("on_brief", parsed.get("on\\_brief", False)),
                 "occlusion": parsed.get("occlusion", False),
-                "contrast_ok": parsed.get("contrast_ok", False),
-                "cta_present": parsed.get("cta_present", False),
+                "contrast_ok": parsed.get("contrast_ok", parsed.get("contrast\\_ok", False)),
+                "cta_present": parsed.get("cta_present", parsed.get("cta\\_present", False)),
                 "issues": parsed.get("issues", []),
                 "reasoning": parsed.get("reasoning", ""),
                 "analysis": response  # 원본 응답도 보관
@@ -747,9 +762,9 @@ def _parse_judge_response(response: str) -> Dict[str, Any]:
     # Step 2: 정규식 fallback 파싱
     response_lower = response.lower()
     
-    # on_brief 파싱
+    # on_brief 파싱 (이스케이프된 언더스코어도 처리)
     on_brief = False
-    on_brief_match = re.search(r'"on_brief"[:\s]+(true|false)', response, re.IGNORECASE)
+    on_brief_match = re.search(r'"on[\\_]brief"[:\s]+(true|false)', response, re.IGNORECASE)
     if not on_brief_match:
         on_brief_match = re.search(r'on[_\s]brief[:\s]+(true|false|yes|no)', response_lower)
     if on_brief_match:
@@ -769,9 +784,9 @@ def _parse_judge_response(response: str) -> Dict[str, Any]:
         # 키워드 기반 fallback
         occlusion = "occlude" in response_lower or "blocked" in response_lower or "hidden" in response_lower
     
-    # contrast_ok 파싱
+    # contrast_ok 파싱 (이스케이프된 언더스코어도 처리)
     contrast_ok = False
-    contrast_match = re.search(r'"contrast_ok"[:\s]+(true|false)', response, re.IGNORECASE)
+    contrast_match = re.search(r'"contrast[\\_]ok"[:\s]+(true|false)', response, re.IGNORECASE)
     if not contrast_match:
         contrast_match = re.search(r'contrast[_\s]ok[:\s]+(true|false|yes|no)', response_lower)
     if contrast_match:
@@ -780,9 +795,9 @@ def _parse_judge_response(response: str) -> Dict[str, Any]:
         # 키워드 기반 fallback
         contrast_ok = "contrast" in response_lower and ("good" in response_lower or "appropriate" in response_lower or "adequate" in response_lower)
     
-    # cta_present 파싱
+    # cta_present 파싱 (이스케이프된 언더스코어도 처리)
     cta_present = False
-    cta_match = re.search(r'"cta_present"[:\s]+(true|false)', response, re.IGNORECASE)
+    cta_match = re.search(r'"cta[\\_]present"[:\s]+(true|false)', response, re.IGNORECASE)
     if not cta_match:
         cta_match = re.search(r'cta[_\s]present[:\s]+(true|false|yes|no)', response_lower)
     if cta_match:
