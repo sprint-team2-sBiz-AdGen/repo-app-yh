@@ -61,6 +61,10 @@ USE_QUANTIZATION = os.getenv("USE_QUANTIZATION", "true").lower() in ("true", "1"
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# EasyOCR 모델 저장 디렉토리 (MODEL_DIR 내부)
+EASYOCR_MODEL_DIR = os.path.join(MODEL_DIR, "easyocr")
+os.makedirs(EASYOCR_MODEL_DIR, exist_ok=True)
+
 # YOLO 모델 설정
 YOLO_MODEL_NAME = os.getenv("YOLO_MODEL_NAME", "yolov8x-seg.pt")
 YOLO_CONF_THRESHOLD = float(os.getenv("YOLO_CONF_THRESHOLD", "0.25"))

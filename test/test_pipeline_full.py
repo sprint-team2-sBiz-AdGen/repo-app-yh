@@ -327,6 +327,197 @@ def test_planner(job_id: str, tenant_id: str, api_url: str = "http://localhost:8
         raise
 
 
+def test_llava_stage2(job_id: str, tenant_id: str, overlay_id: str = None, api_url: str = "http://localhost:8011") -> dict:
+    """LLaVA Stage 2 Judge API 테스트"""
+    print("\n" + "=" * 60)
+    print("LLaVA Stage 2 Judge API 테스트")
+    print("=" * 60)
+    
+    url = f"{api_url}/api/yh/llava/stage2/judge"
+    
+    request_data = {
+        "job_id": job_id,
+        "tenant_id": tenant_id
+    }
+    
+    if overlay_id:
+        request_data["overlay_id"] = overlay_id
+    
+    print(f"\n요청 URL: {url}")
+    print(f"요청 데이터:")
+    print(f"  - Job ID: {job_id}")
+    print(f"  - Tenant ID: {tenant_id}")
+    print(f"  - Overlay ID: {overlay_id or 'None (자동 조회)'}")
+    
+    try:
+        response = requests.post(url, json=request_data, timeout=300)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        print(f"\n✓ API 호출 성공!")
+        print(f"\n응답 데이터:")
+        print(f"  - Job ID: {result.get('job_id')}")
+        print(f"  - VLM Trace ID: {result.get('vlm_trace_id')}")
+        print(f"  - On Brief: {result.get('on_brief')}")
+        print(f"  - Occlusion: {result.get('occlusion')}")
+        print(f"  - Contrast OK: {result.get('contrast_ok')}")
+        print(f"  - CTA Present: {result.get('cta_present')}")
+        print(f"  - Issues: {result.get('issues', [])}")
+        
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"\n❌ HTTP 오류: {e}")
+        if hasattr(e.response, 'text'):
+            print(f"  응답 내용: {e.response.text}")
+        raise
+    except Exception as e:
+        print(f"\n❌ 오류: {e}")
+        raise
+
+
+def test_ocr_eval(job_id: str, tenant_id: str, overlay_id: str, api_url: str = "http://localhost:8011") -> dict:
+    """OCR 평가 API 테스트"""
+    print("\n" + "=" * 60)
+    print("OCR 평가 API 테스트")
+    print("=" * 60)
+    
+    url = f"{api_url}/api/yh/ocr/evaluate"
+    
+    request_data = {
+        "job_id": job_id,
+        "tenant_id": tenant_id,
+        "overlay_id": overlay_id
+    }
+    
+    print(f"\n요청 URL: {url}")
+    print(f"요청 데이터:")
+    print(f"  - Job ID: {job_id}")
+    print(f"  - Tenant ID: {tenant_id}")
+    print(f"  - Overlay ID: {overlay_id}")
+    
+    try:
+        response = requests.post(url, json=request_data, timeout=300)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        print(f"\n✓ API 호출 성공!")
+        print(f"\n응답 데이터:")
+        print(f"  - Evaluation ID: {result.get('evaluation_id')}")
+        print(f"  - OCR Confidence: {result.get('ocr_confidence', 0):.3f}")
+        print(f"  - OCR Accuracy: {result.get('ocr_accuracy', 0):.3f}")
+        print(f"  - Character Match Rate: {result.get('character_match_rate', 0):.3f}")
+        print(f"  - Word Match Rate: {result.get('word_match_rate', 0):.3f}")
+        print(f"  - Recognized Text: {result.get('recognized_text', '')[:50]}...")
+        print(f"  - Original Text: {result.get('original_text', '')[:50]}...")
+        
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"\n❌ HTTP 오류: {e}")
+        if hasattr(e.response, 'text'):
+            print(f"  응답 내용: {e.response.text}")
+        raise
+    except Exception as e:
+        print(f"\n❌ 오류: {e}")
+        raise
+
+
+def test_readability_eval(job_id: str, tenant_id: str, overlay_id: str, api_url: str = "http://localhost:8011") -> dict:
+    """가독성 평가 API 테스트"""
+    print("\n" + "=" * 60)
+    print("가독성 평가 API 테스트")
+    print("=" * 60)
+    
+    url = f"{api_url}/api/yh/readability/evaluate"
+    
+    request_data = {
+        "job_id": job_id,
+        "tenant_id": tenant_id,
+        "overlay_id": overlay_id
+    }
+    
+    print(f"\n요청 URL: {url}")
+    print(f"요청 데이터:")
+    print(f"  - Job ID: {job_id}")
+    print(f"  - Tenant ID: {tenant_id}")
+    print(f"  - Overlay ID: {overlay_id}")
+    
+    try:
+        response = requests.post(url, json=request_data, timeout=120)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        print(f"\n✓ API 호출 성공!")
+        print(f"\n응답 데이터:")
+        print(f"  - Evaluation ID: {result.get('evaluation_id')}")
+        print(f"  - Contrast Ratio: {result.get('contrast_ratio', 0):.2f}:1")
+        print(f"  - Readability Score: {result.get('readability_score', 0):.3f}")
+        print(f"  - WCAG AA Compliant: {result.get('wcag_aa_compliant', False)}")
+        print(f"  - WCAG AAA Compliant: {result.get('wcag_aaa_compliant', False)}")
+        print(f"  - Text Color: {result.get('text_color', 'N/A')}")
+        print(f"  - Background Color: {result.get('background_color', 'N/A')}")
+        
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"\n❌ HTTP 오류: {e}")
+        if hasattr(e.response, 'text'):
+            print(f"  응답 내용: {e.response.text}")
+        raise
+    except Exception as e:
+        print(f"\n❌ 오류: {e}")
+        raise
+
+
+def test_iou_eval(job_id: str, tenant_id: str, overlay_id: str, api_url: str = "http://localhost:8011") -> dict:
+    """IoU 평가 API 테스트"""
+    print("\n" + "=" * 60)
+    print("IoU 평가 API 테스트")
+    print("=" * 60)
+    
+    url = f"{api_url}/api/yh/iou/evaluate"
+    
+    request_data = {
+        "job_id": job_id,
+        "tenant_id": tenant_id,
+        "overlay_id": overlay_id
+    }
+    
+    print(f"\n요청 URL: {url}")
+    print(f"요청 데이터:")
+    print(f"  - Job ID: {job_id}")
+    print(f"  - Tenant ID: {tenant_id}")
+    print(f"  - Overlay ID: {overlay_id}")
+    
+    try:
+        response = requests.post(url, json=request_data, timeout=120)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        print(f"\n✓ API 호출 성공!")
+        print(f"\n응답 데이터:")
+        print(f"  - Evaluation ID: {result.get('evaluation_id')}")
+        print(f"  - IoU with Food: {result.get('iou_with_food', 0):.4f}")
+        print(f"  - Overlap Detected: {result.get('overlap_detected', False)}")
+        print(f"  - Max IoU Detection ID: {result.get('max_iou_detection_id', 'N/A')}")
+        
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"\n❌ HTTP 오류: {e}")
+        if hasattr(e.response, 'text'):
+            print(f"  응답 내용: {e.response.text}")
+        raise
+    except Exception as e:
+        print(f"\n❌ 오류: {e}")
+        raise
+
+
 def test_overlay(job_id: str, tenant_id: str, proposal_id: str = None, api_url: str = "http://localhost:8011") -> dict:
     """Overlay API 테스트"""
     print("\n" + "=" * 60)
@@ -642,6 +833,14 @@ def main():
                        help="Planner 건너뛰기")
     parser.add_argument("--skip-overlay", action="store_true",
                        help="Overlay 건너뛰기")
+    parser.add_argument("--skip-llava-stage2", action="store_true",
+                       help="LLaVA Stage 2 건너뛰기")
+    parser.add_argument("--skip-ocr", action="store_true",
+                       help="OCR 평가 건너뛰기")
+    parser.add_argument("--skip-readability", action="store_true",
+                       help="가독성 평가 건너뛰기")
+    parser.add_argument("--skip-iou", action="store_true",
+                       help="IoU 평가 건너뛰기")
     args = parser.parse_args()
     
     # DB 연결
@@ -734,8 +933,10 @@ def main():
             print("\n⚠ Planner 건너뛰기")
         
         # Overlay 테스트
+        overlay_id = None
         if not args.skip_overlay:
             overlay_result = test_overlay(job_id, tenant_id, proposal_id, args.api_url)
+            overlay_id = overlay_result.get('overlay_id')
             
             # Overlay 이후 상태 확인
             print("\n" + "=" * 60)
@@ -744,6 +945,56 @@ def main():
             check_job_status(db, job_id, expected_step="overlay", expected_status="done")
         else:
             print("\n⚠ Overlay 건너뛰기")
+            # overlay_id를 DB에서 찾기
+            if not overlay_id:
+                job_input = db.query(JobInput).filter(JobInput.job_id == uuid.UUID(job_id)).first()
+                if job_input:
+                    planner_proposals = db.query(PlannerProposal).filter(
+                        PlannerProposal.image_asset_id == job_input.img_asset_id
+                    ).order_by(PlannerProposal.created_at.desc()).all()
+                    if planner_proposals:
+                        overlay_layout = db.query(OverlayLayout).filter(
+                            OverlayLayout.proposal_id == planner_proposals[0].proposal_id
+                        ).order_by(OverlayLayout.created_at.desc()).first()
+                        if overlay_layout:
+                            overlay_id = str(overlay_layout.overlay_id)
+        
+        # LLaVA Stage 2 테스트
+        if not args.skip_llava_stage2:
+            if overlay_id:
+                llava_stage2_result = test_llava_stage2(job_id, tenant_id, overlay_id, args.api_url)
+                
+                # LLaVA Stage 2 이후 상태 확인
+                print("\n" + "=" * 60)
+                print("LLaVA Stage 2 이후 Job 상태 확인")
+                print("=" * 60)
+                check_job_status(db, job_id, expected_step="vlm_judge", expected_status="done")
+            else:
+                print("\n⚠ Overlay ID가 없어 LLaVA Stage 2를 건너뜁니다")
+        else:
+            print("\n⚠ LLaVA Stage 2 건너뛰기")
+        
+        # 정량 평가 테스트
+        if overlay_id:
+            # OCR 평가
+            if not args.skip_ocr:
+                ocr_result = test_ocr_eval(job_id, tenant_id, overlay_id, args.api_url)
+            else:
+                print("\n⚠ OCR 평가 건너뛰기")
+            
+            # 가독성 평가
+            if not args.skip_readability:
+                readability_result = test_readability_eval(job_id, tenant_id, overlay_id, args.api_url)
+            else:
+                print("\n⚠ 가독성 평가 건너뛰기")
+            
+            # IoU 평가
+            if not args.skip_iou:
+                iou_result = test_iou_eval(job_id, tenant_id, overlay_id, args.api_url)
+            else:
+                print("\n⚠ IoU 평가 건너뛰기")
+        else:
+            print("\n⚠ Overlay ID가 없어 정량 평가를 건너뜁니다")
         
         # 최종 DB 레코드 확인
         verify_db_records(db, job_id)

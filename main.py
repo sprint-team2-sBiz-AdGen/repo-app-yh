@@ -20,13 +20,42 @@
 ########################################################
 
 import os
+import subprocess
+import logging
 from fastapi import FastAPI
 from config import PART_NAME, HOST, PORT
 from middleware import metrics_middleware, metrics_endpoint
 from routers import (
     yolo, planner, overlay, evals, llava_stage1, llava_stage2, health,
-    gpt, refined_ad_copy
+    gpt, refined_ad_copy, ocr_eval, readability_eval, iou_eval
 )
+
+logger = logging.getLogger(__name__)
+
+# 애플리케이션 시작 시 폰트 설치 확인
+def check_and_install_fonts():
+    """폰트 설치 확인 및 설치"""
+    try:
+        # 폰트 설치 스크립트 실행
+        result = subprocess.run(
+            ["/usr/local/bin/install_fonts.sh"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            logger.info("✓ 폰트 설치 확인 완료")
+            if result.stdout:
+                logger.info(f"폰트 설치 로그:\n{result.stdout}")
+        else:
+            logger.warning(f"⚠️ 폰트 설치 스크립트 실행 중 경고: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.error("❌ 폰트 설치 스크립트 실행 시간 초과")
+    except Exception as e:
+        logger.error(f"❌ 폰트 설치 확인 중 오류: {e}")
+
+# 애플리케이션 시작 시 폰트 확인
+check_and_install_fonts()
 
 # root_path는 리버스 프록시(nginx) 뒤에서만 필요
 # 직접 접근 시에는 None으로 설정하여 /docs가 정상 작동하도록 함
@@ -51,6 +80,9 @@ app.include_router(overlay.router)
 app.include_router(evals.router)
 app.include_router(llava_stage1.router)
 app.include_router(llava_stage2.router)
+app.include_router(ocr_eval.router)
+app.include_router(readability_eval.router)
+app.include_router(iou_eval.router)
 app.include_router(gpt.router)
 app.include_router(refined_ad_copy.router)
 app.include_router(health.router)

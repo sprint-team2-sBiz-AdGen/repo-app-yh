@@ -180,6 +180,21 @@ class TestAsset(Base):
     updated_at = Column(DateTime(timezone=True), default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
 
+class Evaluation(Base):
+    """Evaluations 데이터베이스 모델"""
+    __tablename__ = "evaluations"
+    
+    evaluation_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=True)
+    overlay_id = Column(UUID(as_uuid=True), ForeignKey("overlay_layouts.overlay_id"), nullable=True)
+    evaluation_type = Column(String(50), nullable=False)  # 'ocr', 'readability', 'iou', 'llava_judge'
+    metrics = Column(JSONB, nullable=False)  # 평가 메트릭
+    uid = Column(String(255), unique=True, nullable=True)
+    pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 def get_db():
     """DB 세션 의존성"""
     db = SessionLocal()

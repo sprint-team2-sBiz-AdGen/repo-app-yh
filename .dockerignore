@@ -18,5 +18,20 @@ build/
 .DS_Store
 *.log
 
+# 큰 디렉토리 (빌드 컨텍스트에서 제외)
+model/
+korfont_test/
+pipeline_test/
+old/
+test/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ttf
+*.otf
+*.woff
+*.woff2
+
 
 

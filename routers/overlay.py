@@ -305,6 +305,13 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         
         # 폰트 매핑은 fonts.py에서 import하여 사용
         
+        # 한글 텍스트 감지
+        import re
+        has_korean = False
+        if body.text:
+            korean_pattern = re.compile(r'[가-힣]')
+            has_korean = bool(korean_pattern.search(body.text))
+        
         # 폰트 경로 선택: LLaVA 추천 폰트를 직접 사용 (우선순위 없음)
         font_style = None
         font_name = None
@@ -318,8 +325,20 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             font_name = font_recommendation.get('font_name')
             font_style = font_recommendation.get('font_style')
             logger.info(f"[폰트 추천] LLaVA 추천: font_name={font_name}, font_style={font_style}")
+            
+            # 한글 텍스트인데 font_name이 없으면 경고 및 기본 한글 폰트 사용
+            if has_korean and not font_name:
+                logger.warning(f"[폰트 추천] ⚠️ 한글 텍스트인데 LLaVA가 font_name을 추천하지 않음. 기본 한글 폰트 사용: 'Gmarket Sans'")
+                font_name = 'Gmarket Sans'
+                font_style = 'sans-serif'
         else:
-            logger.info(f"[폰트 추천] LLaVA 추천 없음, 기본값 사용")
+            # LLaVA 추천이 없을 때
+            if has_korean:
+                logger.warning(f"[폰트 추천] ⚠️ 한글 텍스트인데 LLaVA 추천이 없음. 기본 한글 폰트 사용: 'Gmarket Sans'")
+                font_name = 'Gmarket Sans'
+                font_style = 'sans-serif'
+            else:
+                logger.info(f"[폰트 추천] LLaVA 추천 없음, 기본값 사용")
         
         # LLaVA가 추천한 폰트 이름을 직접 사용 (우선순위 없음)
         font_paths = None
