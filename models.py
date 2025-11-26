@@ -131,8 +131,10 @@ class EvalIn(BaseModel):
 
 class JudgeIn(BaseModel):
     """Judge 요청 모델"""
+    job_id: str  # 기존 job의 ID (업데이트할 job)
     tenant_id: str
-    render_asset_url: str
+    overlay_id: Optional[str] = None  # Optional: overlay_layouts에서 render_asset_url을 가져올 수 있으면 생략 가능
+    render_asset_url: Optional[str] = None  # Optional: overlay_id가 있으면 생략 가능
 
 
 class LLaVaStage1In(BaseModel):
@@ -180,4 +182,16 @@ class RefinedAdCopyIn(BaseModel):
     tenant_id: str
     ad_copy_text: str
     available_fonts: Optional[list] = None  # 가용 폰트 리스트
+
+
+class JudgeOut(BaseModel):
+    """Judge 응답 모델 (DB ID 포함)"""
+    job_id: str  # UUID 문자열
+    vlm_trace_id: str  # UUID 문자열
+    on_brief: bool  # brief 준수 여부
+    occlusion: bool  # 가림 여부 (True면 가림 있음)
+    contrast_ok: bool  # 대비 적절성
+    cta_present: bool  # CTA 존재 여부
+    analysis: str  # LLaVA 분석 결과 텍스트
+    issues: List[str]  # 발견된 이슈 목록
 

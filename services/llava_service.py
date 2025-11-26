@@ -24,11 +24,14 @@
 
 import os
 import re
+import logging
 from typing import Optional, Dict, Any
 from PIL import Image
 import torch
 from transformers import LlavaProcessor, LlavaForConditionalGeneration
 from config import LLAVA_MODEL_NAME, DEVICE_TYPE, MODEL_DIR, USE_QUANTIZATION
+
+logger = logging.getLogger(__name__)
 
 # 디바이스 설정
 DEVICE = DEVICE_TYPE if DEVICE_TYPE == "cuda" and torch.cuda.is_available() else "cpu"
@@ -669,34 +672,176 @@ def judge_final_ad(
         판단 결과 딕셔너리
     """
     if judge_prompt is None:
-        judge_prompt = """Analyze this final advertisement image and evaluate:
-1. Does it follow the advertising brief? (on_brief)
-2. Is there any text or important content occluded? (occlusion)
-3. Is the contrast between text and background appropriate? (contrast_ok)
-4. Is there a clear call-to-action (CTA) present? (cta_present)
-5. List any issues or problems you find.
+        judge_prompt = """Analyze this final advertisement image and evaluate the following aspects. Provide your response in JSON format.
 
-Provide your analysis in a structured format."""
+## Evaluation Criteria
+
+1. **on_brief**: Does the advertisement follow the advertising brief? (true/false)
+2. **occlusion**: Is there any text or important content occluded/blocked? (true if occluded, false if not)
+3. **contrast_ok**: Is the contrast between text and background appropriate for readability? (true/false)
+4. **cta_present**: Is there a clear call-to-action (CTA) present? (true/false)
+5. **issues**: List any specific issues or problems you find (array of strings)
+
+## Response Format (JSON)
+
+{
+  "on_brief": true/false,
+  "occlusion": true/false,
+  "contrast_ok": true/false,
+  "cta_present": true/false,
+  "issues": ["issue1", "issue2", ...],
+  "reasoning": "Brief explanation of your evaluation"
+}
+
+## Important Notes
+- If no issues are found, return an empty array for "issues": []
+- Be specific in your issues list
+- "occlusion" should be true if any text or important content is blocked/occluded, false otherwise
+- Provide your response as valid JSON only."""
     
-    response = process_image_with_llava(image, judge_prompt)
+    # GPU 메모리 정리 후 실행
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
     
-    # 응답 파싱 (간단한 예제, 실제로는 더 정교한 파싱 필요)
-    on_brief = "brief" in response.lower() and ("follow" in response.lower() or "yes" in response.lower())
-    occlusion = "occlude" in response.lower() and "no" in response.lower()
-    contrast_ok = "contrast" in response.lower() and ("good" in response.lower() or "appropriate" in response.lower())
-    cta_present = "cta" in response.lower() or "call-to-action" in response.lower()
+    response = process_image_with_llava(image, judge_prompt, max_new_tokens=512, temperature=0.7, do_sample=True)
     
+    # GPU 메모리 정리
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+    
+    # JSON 파싱 시도
+    result = _parse_judge_response(response)
+    
+    return result
+
+
+def _parse_judge_response(response: str) -> Dict[str, Any]:
+    """
+    LLaVA Stage 2 응답 파싱 (JSON 우선, 정규식 fallback)
+    
+    Args:
+        response: LLaVA 응답 텍스트
+    
+    Returns:
+        파싱된 판단 결과 딕셔너리
+    """
+    import json
+    
+    # Step 1: JSON 파싱 시도
+    try:
+        # JSON 블록 추출 시도
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            
+            # 이스케이프된 언더스코어를 일반 언더스코어로 변환 (LLaVA가 "on\_brief"로 반환하는 경우 대비)
+            json_str = json_str.replace('\\_', '_')
+            
+            parsed = json.loads(json_str)
+            
+            # 필수 필드 확인 및 기본값 설정 (이스케이프된 키와 일반 키 모두 시도)
+            result = {
+                "on_brief": parsed.get("on_brief", parsed.get("on\\_brief", False)),
+                "occlusion": parsed.get("occlusion", False),
+                "contrast_ok": parsed.get("contrast_ok", parsed.get("contrast\\_ok", False)),
+                "cta_present": parsed.get("cta_present", parsed.get("cta\\_present", False)),
+                "issues": parsed.get("issues", []),
+                "reasoning": parsed.get("reasoning", ""),
+                "analysis": response  # 원본 응답도 보관
+            }
+            
+            # issues가 문자열이면 리스트로 변환
+            if isinstance(result["issues"], str):
+                result["issues"] = [result["issues"]] if result["issues"] else []
+            
+            logger.info(f"[Judge 파싱] JSON 파싱 성공: {result}")
+            return result
+    except (json.JSONDecodeError, AttributeError) as e:
+        logger.warning(f"[Judge 파싱] JSON 파싱 실패, 정규식 fallback 사용: {e}")
+    
+    # Step 2: 정규식 fallback 파싱
+    response_lower = response.lower()
+    
+    # on_brief 파싱 (이스케이프된 언더스코어도 처리)
+    on_brief = False
+    on_brief_match = re.search(r'"on[\\_]brief"[:\s]+(true|false)', response, re.IGNORECASE)
+    if not on_brief_match:
+        on_brief_match = re.search(r'on[_\s]brief[:\s]+(true|false|yes|no)', response_lower)
+    if on_brief_match:
+        on_brief = on_brief_match.group(1).lower() in ("true", "yes")
+    else:
+        # 키워드 기반 fallback
+        on_brief = "brief" in response_lower and ("follow" in response_lower or "yes" in response_lower or "appropriate" in response_lower)
+    
+    # occlusion 파싱 (true면 가림 있음)
+    occlusion = False
+    occlusion_match = re.search(r'"occlusion"[:\s]+(true|false)', response, re.IGNORECASE)
+    if not occlusion_match:
+        occlusion_match = re.search(r'occlusion[:\s]+(true|false|yes|no)', response_lower)
+    if occlusion_match:
+        occlusion = occlusion_match.group(1).lower() in ("true", "yes")
+    else:
+        # 키워드 기반 fallback
+        occlusion = "occlude" in response_lower or "blocked" in response_lower or "hidden" in response_lower
+    
+    # contrast_ok 파싱 (이스케이프된 언더스코어도 처리)
+    contrast_ok = False
+    contrast_match = re.search(r'"contrast[\\_]ok"[:\s]+(true|false)', response, re.IGNORECASE)
+    if not contrast_match:
+        contrast_match = re.search(r'contrast[_\s]ok[:\s]+(true|false|yes|no)', response_lower)
+    if contrast_match:
+        contrast_ok = contrast_match.group(1).lower() in ("true", "yes")
+    else:
+        # 키워드 기반 fallback
+        contrast_ok = "contrast" in response_lower and ("good" in response_lower or "appropriate" in response_lower or "adequate" in response_lower)
+    
+    # cta_present 파싱 (이스케이프된 언더스코어도 처리)
+    cta_present = False
+    cta_match = re.search(r'"cta[\\_]present"[:\s]+(true|false)', response, re.IGNORECASE)
+    if not cta_match:
+        cta_match = re.search(r'cta[_\s]present[:\s]+(true|false|yes|no)', response_lower)
+    if cta_match:
+        cta_present = cta_match.group(1).lower() in ("true", "yes")
+    else:
+        # 키워드 기반 fallback
+        cta_present = "cta" in response_lower or "call-to-action" in response_lower or "call to action" in response_lower
+    
+    # issues 파싱
     issues = []
-    if "issue" in response.lower() or "problem" in response.lower():
-        # TODO: 실제 이슈 추출 로직 구현
-        issues = ["Some issues detected - check analysis"]
+    issues_match = re.search(r'"issues"[:\s]+\[(.*?)\]', response, re.IGNORECASE | re.DOTALL)
+    if issues_match:
+        issues_str = issues_match.group(1)
+        # JSON 배열 파싱 시도
+        try:
+            issues = json.loads(f"[{issues_str}]")
+        except:
+            # 쉼표로 구분된 문자열 파싱
+            issues = [issue.strip().strip('"\'') for issue in issues_str.split(",") if issue.strip()]
+    else:
+        # 키워드 기반 이슈 추출
+        if "issue" in response_lower or "problem" in response_lower:
+            # 이슈가 언급된 문장 추출
+            issue_sentences = re.findall(r'[^.!?]*(?:issue|problem|error|concern)[^.!?]*[.!?]', response_lower, re.IGNORECASE)
+            issues = [s.strip() for s in issue_sentences[:5]]  # 최대 5개
     
-    return {
+    # reasoning 추출
+    reasoning = ""
+    reasoning_match = re.search(r'"reasoning"[:\s]+"([^"]+)"', response, re.IGNORECASE | re.DOTALL)
+    if not reasoning_match:
+        reasoning_match = re.search(r'reasoning[:\s]+([^\n]+)', response, re.IGNORECASE)
+    if reasoning_match:
+        reasoning = reasoning_match.group(1).strip()
+    
+    result = {
         "on_brief": on_brief,
-        "occlusion": not occlusion,  # occlusion이 False면 가림 없음
+        "occlusion": occlusion,  # true면 가림 있음
         "contrast_ok": contrast_ok,
         "cta_present": cta_present,
-        "analysis": response,
-        "issues": issues
+        "issues": issues if issues else [],
+        "reasoning": reasoning,
+        "analysis": response  # 원본 응답도 보관
     }
+    
+    logger.info(f"[Judge 파싱] 정규식 파싱 완료: {result}")
+    return result
 
