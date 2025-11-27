@@ -221,7 +221,6 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
         if image_asset_id:  # image_asset_id가 있는 경우에만 저장
             for i, box in enumerate(boxes):
                 detection_id = uuid.uuid4()
-                detection_uid = uuid.uuid4().hex
                 
                 # box를 JSONB 형식으로 저장 [x1, y1, x2, y2]
                 box_json = json.dumps(box)
@@ -234,11 +233,11 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
                     text("""
                         INSERT INTO detections (
                             detection_id, job_id, image_asset_id, model_id, box, 
-                            label, score, uid, created_at, updated_at
+                            label, score, created_at, updated_at
                         )
                         VALUES (
                             :detection_id, :job_id, :image_asset_id, :model_id, CAST(:box AS jsonb),
-                            :label, :score, :uid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                            :label, :score, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                         )
                     """),
                     {
@@ -248,8 +247,7 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
                         "model_id": None,  # gen_models 테이블에 YOLO 모델이 등록되어 있으면 해당 ID 사용
                         "box": box_json,
                         "label": label,
-                        "score": float(score),
-                        "uid": detection_uid
+                        "score": float(score)
                     }
                 )
                 detection_ids.append(detection_id)

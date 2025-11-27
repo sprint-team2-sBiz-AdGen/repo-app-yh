@@ -523,7 +523,6 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         overlay_id = None
         try:
             overlay_id_uuid = uuid.uuid4()
-            overlay_uid = uuid.uuid4().hex
             
             # layout JSONB 데이터 구성
             layout_data = {
@@ -542,11 +541,11 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                 text("""
                     INSERT INTO overlay_layouts (
                         overlay_id, proposal_id, layout, x_ratio, y_ratio,
-                        width_ratio, height_ratio, text_margin, latency_ms, uid,
+                        width_ratio, height_ratio, text_margin, latency_ms,
                         created_at, updated_at
                     ) VALUES (
                         :overlay_id, :proposal_id, CAST(:layout AS jsonb), :x_ratio, :y_ratio,
-                        :width_ratio, :height_ratio, :text_margin, :latency_ms, :uid,
+                        :width_ratio, :height_ratio, :text_margin, :latency_ms,
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
                 """),
@@ -559,8 +558,7 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                     "width_ratio": width_ratio if width_ratio is not None else 0.8,
                     "height_ratio": height_ratio if height_ratio is not None else 0.18,
                     "text_margin": body.margin,
-                    "latency_ms": latency_ms,
-                    "uid": overlay_uid
+                    "latency_ms": latency_ms
                 }
             )
             db.commit()

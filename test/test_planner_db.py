@@ -95,15 +95,14 @@ def setup_test_job_for_planner(db: Session, tenant_id: str, image_path: str = No
         print(f"✓ 기존 image_asset 레코드 발견: {image_asset_id}")
     else:
         image_asset_id = uuid.uuid4()
-        image_asset_uid = uuid.uuid4().hex
         db.execute(
             text("""
                 INSERT INTO image_assets (
                     image_asset_id, image_type, image_url, width, height,
-                    tenant_id, uid, created_at, updated_at
+                    tenant_id, created_at, updated_at
                 ) VALUES (
                     :image_asset_id, :image_type, :image_url, :width, :height,
-                    :tenant_id, :uid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
             """),
             {
@@ -112,8 +111,7 @@ def setup_test_job_for_planner(db: Session, tenant_id: str, image_path: str = No
                 "image_url": asset_url,
                 "width": image.size[0],
                 "height": image.size[1],
-                "tenant_id": tenant_id,
-                "uid": image_asset_uid
+                "tenant_id": tenant_id
             }
         )
         db.commit()
@@ -364,7 +362,6 @@ def verify_db_records(db: Session, job_id: str):
                 latest_proposal = planner_proposals[0]
                 print(f"    - Proposal ID: {latest_proposal.proposal_id}")
                 print(f"    - Image Asset ID: {latest_proposal.image_asset_id}")
-                print(f"    - UID: {latest_proposal.uid}")
                 
                 if latest_proposal.layout:
                     layout = latest_proposal.layout

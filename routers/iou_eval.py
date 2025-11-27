@@ -131,11 +131,11 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                     text("""
                         INSERT INTO evaluations (
                             evaluation_id, job_id, overlay_id, evaluation_type,
-                            metrics, uid, created_at, updated_at
+                            metrics, created_at, updated_at
                         )
                         VALUES (
                             :evaluation_id, :job_id, :overlay_id, :evaluation_type,
-                            CAST(:metrics AS jsonb), :uid,
+                            CAST(:metrics AS jsonb),
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                         )
                     """),
@@ -144,8 +144,7 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                         "job_id": job_id,
                         "overlay_id": overlay_id_uuid,
                         "evaluation_type": "iou",
-                        "metrics": json.dumps(metrics),
-                        "uid": uuid.uuid4().hex
+                        "metrics": json.dumps(metrics)
                     }
                 )
                 db.commit()
@@ -204,11 +203,11 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                     text("""
                         INSERT INTO evaluations (
                             evaluation_id, job_id, overlay_id, evaluation_type,
-                            metrics, uid, created_at, updated_at
+                            metrics, created_at, updated_at
                         )
                         VALUES (
                             :evaluation_id, :job_id, :overlay_id, :evaluation_type,
-                            CAST(:metrics AS jsonb), :uid,
+                            CAST(:metrics AS jsonb),
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                         )
                     """),
@@ -217,8 +216,7 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                         "job_id": job_id,
                         "overlay_id": overlay_id_uuid,
                         "evaluation_type": "iou",
-                        "metrics": json.dumps(metrics),
-                        "uid": uuid.uuid4().hex
+                        "metrics": json.dumps(metrics)
                     }
                 )
                 db.commit()
@@ -276,11 +274,11 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                 text("""
                     INSERT INTO evaluations (
                         evaluation_id, job_id, overlay_id, evaluation_type,
-                        metrics, uid, created_at, updated_at
+                        metrics, created_at, updated_at
                     )
                     VALUES (
                         :evaluation_id, :job_id, :overlay_id, :evaluation_type,
-                        CAST(:metrics AS jsonb), :uid,
+                        CAST(:metrics AS jsonb),
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
                 """),
@@ -289,8 +287,7 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                     "job_id": job_id,
                     "overlay_id": overlay_id_uuid,
                     "evaluation_type": "iou",
-                    "metrics": json.dumps(metrics),
-                    "uid": uuid.uuid4().hex
+                    "metrics": json.dumps(metrics)
                 }
             )
             db.commit()

@@ -43,7 +43,6 @@ class OverlayLayout(Base):
     height_ratio = Column(Float)
     text_margin = Column(String(50))
     latency_ms = Column(Float, nullable=True)  # Overlay 실행 시간 (밀리초)
-    uid = Column(String(255))
     pk = Column(Integer)
     created_at = Column(DateTime(timezone=True))
     updated_at = Column(DateTime(timezone=True))
@@ -61,7 +60,6 @@ class ImageAsset(Base):
     height = Column(Integer)
     creator_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True)
     tenant_id = Column(String(255), ForeignKey("tenants.tenant_id"), nullable=True)
-    uid = Column(String(255), unique=True)
     pk = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -133,7 +131,6 @@ class Detection(Base):
     box = Column(JSONB)  # [x1, y1, x2, y2] 형식
     label = Column(String(255))
     score = Column(Float)  # DECIMAL(5,4) -> Float
-    uid = Column(String(255), unique=True, nullable=True)
     pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -163,7 +160,6 @@ class PlannerProposal(Base):
     prompt = Column(Text, nullable=True)
     layout = Column(JSONB, nullable=True)  # 레이아웃 정보 (전체 proposals 정보 포함)
     latency_ms = Column(Float, nullable=True)  # Planner 실행 시간 (밀리초)
-    uid = Column(String(255), unique=True, nullable=True)
     pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -192,7 +188,6 @@ class Evaluation(Base):
     overlay_id = Column(UUID(as_uuid=True), ForeignKey("overlay_layouts.overlay_id"), nullable=True)
     evaluation_type = Column(String(50), nullable=False)  # 'ocr', 'readability', 'iou', 'llava_judge'
     metrics = Column(JSONB, nullable=False)  # 평가 메트릭
-    uid = Column(String(255), unique=True, nullable=True)
     pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
