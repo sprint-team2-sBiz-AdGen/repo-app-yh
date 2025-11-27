@@ -78,17 +78,32 @@ def generate_instagram_feed(
 Your task is to create compelling Instagram feed posts in Korean that:
 1. Are engaging and authentic
 2. Match the brand's tone and style
-3. Include relevant hashtags (5-10 hashtags)
+3. MUST include 5-10 relevant hashtags (this is REQUIRED, not optional)
 4. Are optimized for Instagram's format
 5. Encourage user engagement
 
+IMPORTANT: You MUST always include hashtags in your response. The hashtags field must never be empty.
+
 Format your response as JSON with the following structure:
 {
-    "instagram_ad_copy": "The main Instagram post text in Korean",
-    "hashtags": "#hashtag1 #hashtag2 #hashtag3 ..."
+    "instagram_ad_copy": "The main Instagram post text in Korean (without hashtags in the main text)",
+    "hashtags": "#hashtag1 #hashtag2 #hashtag3 #hashtag4 #hashtag5 ..."
 }
 
-Separate the hashtags with spaces, and make sure they are relevant to the product, store, and Korean market."""
+Rules for hashtags:
+- MUST include 5-10 hashtags
+- Each hashtag must start with # symbol
+- Separate hashtags with a single space
+- Use Korean hashtags relevant to the product, store, and Korean market
+- Include popular Korean food/restaurant hashtags like #맛집 #맛스타그램 #먹스타그램 #푸드스타그램
+- Include location-based hashtags if store information is provided
+- Hashtags should be in Korean (한글)
+
+Example format:
+{
+    "instagram_ad_copy": "맛있는 부대찌개를 만나보세요! ...",
+    "hashtags": "#부대찌개 #맛집 #서울맛집 #강남맛집 #한국음식 #맛스타그램 #먹스타그램 #푸드스타그램 #맛있는음식 #데일리"
+}"""
         
         user_prompt = f"""{gpt_prompt}
 
@@ -104,7 +119,14 @@ Separate the hashtags with spaces, and make sure they are relevant to the produc
 **Store Information:**
 {store_information}
 
-Please create an engaging Instagram feed post in Korean based on the above information. The post should be natural, engaging, and include relevant hashtags for the Korean market."""
+Please create an engaging Instagram feed post in Korean based on the above information. 
+
+Requirements:
+1. Write the main post text in Korean (natural, engaging, and authentic)
+2. DO NOT include hashtags in the main post text
+3. MUST include 5-10 relevant Korean hashtags in the "hashtags" field
+4. Hashtags should be related to: the product name, food category, location (if provided), and popular Korean Instagram food hashtags
+5. Make sure the hashtags field is never empty"""
 
         # GPT API 호출 (latency 측정)
         start_time = time.time()
@@ -125,7 +147,35 @@ Please create an engaging Instagram feed post in Korean based on the above infor
         result = json.loads(response_text)
         
         instagram_ad_copy = result.get("instagram_ad_copy", "")
-        hashtags = result.get("hashtags", "")
+        hashtags = result.get("hashtags", "").strip()
+        
+        # 해시태그가 비어있거나 없을 경우 fallback 처리
+        if not hashtags:
+            logger.warning("⚠️ GPT 응답에 해시태그가 없습니다. 기본 해시태그 생성 시도...")
+            # 기본 해시태그 생성 (제품 설명에서 키워드 추출)
+            fallback_hashtags = []
+            if product_description:
+                # 제품명 추출 시도
+                if "부대찌개" in product_description:
+                    fallback_hashtags.append("#부대찌개")
+                if "맛집" in product_description or "맛" in product_description:
+                    fallback_hashtags.append("#맛집")
+            # 기본 해시태그 추가
+            fallback_hashtags.extend([
+                "#맛스타그램", "#먹스타그램", "#푸드스타그램", 
+                "#한국음식", "#데일리"
+            ])
+            if store_information and ("서울" in store_information or "강남" in store_information):
+                fallback_hashtags.append("#서울맛집")
+                if "강남" in store_information:
+                    fallback_hashtags.append("#강남맛집")
+            
+            hashtags = " ".join(fallback_hashtags[:10])  # 최대 10개
+            logger.info(f"✓ Fallback 해시태그 생성: {hashtags}")
+        
+        # 해시태그 정리 (공백 정리, 중복 제거)
+        hashtag_list = [tag.strip() for tag in hashtags.split() if tag.strip().startswith("#")]
+        hashtags = " ".join(list(dict.fromkeys(hashtag_list)))  # 중복 제거하면서 순서 유지
         
         # 프롬프트 구성 (디버깅용)
         prompt_used = f"System: {system_prompt}\n\nUser: {user_prompt}"

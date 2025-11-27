@@ -234,22 +234,37 @@ feedlyai-work/
 
 자세한 테이블 설계는 [DOCS_INSTAGRAM_FEED_DB.md](./DOCS_INSTAGRAM_FEED_DB.md)를 참고하세요.
 
-### 주요 테이블: `instagram_feeds`
+### 주요 테이블
 
+#### `llm_models` 테이블
+- **LLM 모델 정보 중앙 관리**: model_name, provider, default_temperature, default_max_tokens
+- **비용 정보**: prompt_token_cost_per_1m, completion_token_cost_per_1m
+
+#### `instagram_feeds` 테이블
 - **입력 데이터 저장**: refined_ad_copy_eng, tone_style, product_description, store_information, gpt_prompt
 - **출력 데이터 저장**: instagram_ad_copy, hashtags
-- **GPT 메타데이터**: gpt_model_name, gpt_max_tokens, gpt_temperature, gpt_response_raw
-- **성능 메트릭**: latency_ms, token_usage
+- **LLM 모델 참조**: llm_model_id (FK → llm_models)
+- **실제 사용값**: used_temperature, used_max_tokens
+- **GPT 메타데이터**: gpt_prompt_used, gpt_response_raw
+- **성능 메트릭**: latency_ms, prompt_tokens, completion_tokens, total_tokens, token_usage
 - **파이프라인 연동**: job_id, overlay_id (나중에 연결)
 
 ### DB 저장 내용
 
-API 호출 시 다음 정보가 자동으로 `instagram_feeds` 테이블에 저장됩니다:
+API 호출 시 다음 정보가 자동으로 저장됩니다:
 
+**`llm_models` 테이블** (사전 등록 필요):
+- 모델 기본 정보 (model_name, provider, model_version)
+- 기본 설정 (default_temperature, default_max_tokens)
+- 비용 정보 (prompt_token_cost_per_1m, completion_token_cost_per_1m)
+
+**`instagram_feeds` 테이블**:
 - 모든 입력 데이터 (refined_ad_copy_eng, tone_style, product_description, store_information, gpt_prompt)
 - 생성된 결과 (instagram_ad_copy, hashtags)
-- GPT API 메타데이터 (gpt_model_name, gpt_max_tokens, gpt_temperature, gpt_prompt_used, gpt_response_raw)
-- 성능 메트릭 (latency_ms, token_usage)
+- LLM 모델 참조 (llm_model_id → llm_models)
+- 실제 사용값 (used_temperature, used_max_tokens)
+- GPT API 메타데이터 (gpt_prompt_used, gpt_response_raw)
+- 성능 메트릭 (latency_ms, prompt_tokens, completion_tokens, total_tokens, token_usage)
 - 타임스탬프 (created_at, updated_at)
 
 ## 🔄 향후 개선 사항
