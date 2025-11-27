@@ -25,7 +25,7 @@ from typing import Dict, Any
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-from database import SessionLocal, InstagramFeed
+from database import SessionLocal, InstagramFeed, LLMModel
 
 # API 기본 URL
 API_BASE_URL = "http://localhost:8011"
@@ -142,11 +142,23 @@ def verify_db_record(instagram_feed_id: str):
             print(f"  - Tenant ID: {feed.tenant_id}")
             print(f"  - Job ID: {feed.job_id if feed.job_id else 'N/A'}")
             print(f"  - Overlay ID: {feed.overlay_id if feed.overlay_id else 'N/A'}")
-            print(f"  - GPT Model: {feed.gpt_model_name}")
+            
+            # LLM 모델 정보 조회
+            if feed.llm_model_id:
+                llm_model = db.query(LLMModel).filter(LLMModel.llm_model_id == feed.llm_model_id).first()
+                if llm_model:
+                    print(f"  - LLM Model: {llm_model.model_name} ({llm_model.provider})")
+                else:
+                    print(f"  - LLM Model ID: {feed.llm_model_id} (모델 정보 없음)")
+            else:
+                print(f"  - LLM Model ID: N/A")
+            
+            print(f"  - Used Temperature: {feed.used_temperature}" if feed.used_temperature is not None else "  - Used Temperature: N/A")
+            print(f"  - Used Max Tokens: {feed.used_max_tokens}" if feed.used_max_tokens is not None else "  - Used Max Tokens: N/A")
             print(f"  - Latency: {feed.latency_ms:.2f}ms" if feed.latency_ms else "  - Latency: N/A")
-            print(f"  - Prompt Tokens: {feed.prompt_tokens}" if feed.prompt_tokens else "  - Prompt Tokens: N/A")
-            print(f"  - Completion Tokens: {feed.completion_tokens}" if feed.completion_tokens else "  - Completion Tokens: N/A")
-            print(f"  - Total Tokens: {feed.total_tokens}" if feed.total_tokens else "  - Total Tokens: N/A")
+            print(f"  - Prompt Tokens: {feed.prompt_tokens}" if feed.prompt_tokens is not None else "  - Prompt Tokens: N/A")
+            print(f"  - Completion Tokens: {feed.completion_tokens}" if feed.completion_tokens is not None else "  - Completion Tokens: N/A")
+            print(f"  - Total Tokens: {feed.total_tokens}" if feed.total_tokens is not None else "  - Total Tokens: N/A")
             print(f"  - Token Usage (JSON): {feed.token_usage}" if feed.token_usage else "  - Token Usage (JSON): N/A")
             print(f"  - Created At: {feed.created_at}")
             print(f"\n  생성된 글 (일부):")
