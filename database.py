@@ -193,6 +193,24 @@ class Evaluation(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class LLMModel(Base):
+    """LLM Models 데이터베이스 모델"""
+    __tablename__ = "llm_models"
+    
+    llm_model_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    model_name = Column(String(255), nullable=False)  # 모델 이름 (예: "gpt-4o-mini")
+    model_version = Column(String(255), nullable=True)  # 모델 버전 (예: "2024-07-18")
+    provider = Column(String(255), nullable=False)  # 제공자 (예: "openai", "anthropic")
+    default_temperature = Column(Float, nullable=True)  # 기본 temperature 설정
+    default_max_tokens = Column(Integer, nullable=True)  # 기본 최대 토큰 수
+    prompt_token_cost_per_1m = Column(Float, nullable=True)  # 입력 토큰당 비용 (per 1M tokens, USD)
+    completion_token_cost_per_1m = Column(Float, nullable=True)  # 출력 토큰당 비용 (per 1M tokens, USD)
+    description = Column(Text, nullable=True)  # 모델 설명
+    is_active = Column(String(10), default='true')  # 활성화 여부 ('true', 'false')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class InstagramFeed(Base):
     """Instagram Feeds 데이터베이스 모델"""
     __tablename__ = "instagram_feeds"
@@ -200,29 +218,32 @@ class InstagramFeed(Base):
     instagram_feed_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=True)  # 파이프라인과 연결 시 사용
     overlay_id = Column(UUID(as_uuid=True), ForeignKey("overlay_layouts.overlay_id"), nullable=True)  # 오버레이 결과와 연결 시 사용
+    llm_model_id = Column(UUID(as_uuid=True), ForeignKey("llm_models.llm_model_id"), nullable=True)  # 사용된 LLM 모델
     tenant_id = Column(String(255), nullable=False)  # 테넌트 ID
     
-    # 입력 데이터
+    # 입력 데이터 (요청 시 받은 정보)
     refined_ad_copy_eng = Column(Text, nullable=False)  # 조정된 광고문구 (영어)
     tone_style = Column(Text, nullable=False)  # 톤 & 스타일
     product_description = Column(Text, nullable=False)  # 제품 설명
     store_information = Column(Text, nullable=False)  # 스토어 정보
     gpt_prompt = Column(Text, nullable=False)  # GPT 프롬프트
     
-    # 출력 데이터
+    # 출력 데이터 (생성된 결과)
     instagram_ad_copy = Column(Text, nullable=False)  # 생성된 인스타그램 피드 글
     hashtags = Column(Text, nullable=False)  # 생성된 해시태그
     
-    # GPT 메타데이터
-    gpt_model_name = Column(String(255), nullable=True)  # 사용된 GPT 모델
-    gpt_max_tokens = Column(Integer, nullable=True)  # 사용된 최대 토큰 수
-    gpt_temperature = Column(Float, nullable=True)  # 사용된 temperature 설정
-    gpt_prompt_used = Column(Text, nullable=True)  # 실제 사용된 전체 프롬프트
-    gpt_response_raw = Column(JSONB, nullable=True)  # GPT API 원본 응답
+    # LLM 실행 메타데이터 (실제 실행 시 사용된 값)
+    used_temperature = Column(Float, nullable=True)  # 실제 사용된 temperature (기본값과 다를 수 있음)
+    used_max_tokens = Column(Integer, nullable=True)  # 실제 사용된 최대 토큰 수
+    gpt_prompt_used = Column(Text, nullable=True)  # 실제 사용된 전체 프롬프트 (디버깅용)
+    gpt_response_raw = Column(JSONB, nullable=True)  # GPT API 원본 응답 (디버깅/재생성용)
     
     # 성능 메트릭
     latency_ms = Column(Float, nullable=True)  # GPT API 호출 소요 시간 (밀리초)
-    token_usage = Column(JSONB, nullable=True)  # 토큰 사용량 정보
+    prompt_tokens = Column(Integer, nullable=True)  # 프롬프트 토큰 수 (입력)
+    completion_tokens = Column(Integer, nullable=True)  # 생성 토큰 수 (출력)
+    total_tokens = Column(Integer, nullable=True)  # 총 토큰 수
+    token_usage = Column(JSONB, nullable=True)  # 토큰 사용량 정보 (원본 JSON, 모니터링용)
     
     # 메타데이터
     # pk는 DB에서 자동 생성되므로 SQLAlchemy 모델에서는 제외 (DB 스키마에 따라 다를 수 있음)

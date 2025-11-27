@@ -26,7 +26,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from models import InstagramFeedIn, InstagramFeedOut
 from services.gpt_service import generate_instagram_feed
-from database import get_db, InstagramFeed
+from database import get_db, InstagramFeed, LLMModel
 from config import GPT_MODEL_NAME, GPT_MAX_TOKENS
 
 logger = logging.getLogger(__name__)
@@ -63,10 +63,31 @@ def create_instagram_feed(body: InstagramFeedIn, db: Session = Depends(get_db)):
             gpt_prompt=body.gpt_prompt
         )
         
+        # LLM 모델 조회 또는 생성
+        llm_model = db.query(LLMModel).filter(
+            LLMModel.model_name == GPT_MODEL_NAME,
+            LLMModel.is_active == 'true'
+        ).first()
+        
+        if not llm_model:
+            logger.warning(f"⚠️ LLM 모델을 찾을 수 없습니다: {GPT_MODEL_NAME}. 기본 모델 정보로 저장합니다.")
+            # 기본 모델 정보로 저장 (llm_model_id는 NULL)
+            llm_model_id = None
+        else:
+            llm_model_id = llm_model.llm_model_id
+        
         # DB에 저장
         instagram_feed_id = uuid.uuid4()
+        
+        # 토큰 사용량 추출
+        token_usage = result.get("token_usage")
+        prompt_tokens = token_usage.get("prompt_tokens") if token_usage else None
+        completion_tokens = token_usage.get("completion_tokens") if token_usage else None
+        total_tokens = token_usage.get("total_tokens") if token_usage else None
+        
         instagram_feed = InstagramFeed(
             instagram_feed_id=instagram_feed_id,
+            llm_model_id=llm_model_id,
             tenant_id=body.tenant_id,
             refined_ad_copy_eng=body.refined_ad_copy_eng,
             tone_style=body.tone_style,
@@ -75,13 +96,15 @@ def create_instagram_feed(body: InstagramFeedIn, db: Session = Depends(get_db)):
             gpt_prompt=body.gpt_prompt,
             instagram_ad_copy=result["instagram_ad_copy"],
             hashtags=result["hashtags"],
-            gpt_model_name=GPT_MODEL_NAME,
-            gpt_max_tokens=GPT_MAX_TOKENS,
-            gpt_temperature=0.7,
+            used_temperature=0.7,  # 실제 사용된 temperature
+            used_max_tokens=GPT_MAX_TOKENS,  # 실제 사용된 최대 토큰 수
             gpt_prompt_used=result["prompt_used"],
             gpt_response_raw=result.get("gpt_response_raw"),
             latency_ms=result.get("latency_ms"),
-            token_usage=result.get("token_usage")
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            token_usage=token_usage  # 원본 JSON도 저장 (상세 분석용)
         )
         
         db.add(instagram_feed)
