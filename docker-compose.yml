@@ -35,9 +35,12 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       # 현재 작업 디렉토리를 컨테이너에 마운트 (코드 변경 시 자동 반영)
+      # 이 마운트로 인해 호스트의 model/ 디렉토리도 자동으로 /app/model로 마운트됨
       - .:/app
       # 공용 assets 디렉토리 (팀 도커와 동일한 경로 사용)
       - ${ASSETS_DIR:-/opt/feedlyai/assets}:/assets:rw
+      # 폰트 디렉토리 (호스트의 korfont_test를 /opt/feedlyai/fonts로 마운트)
+      - ./korfont_test:/opt/feedlyai/fonts:ro
     command: uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --reload
     restart: unless-stopped
     # depends_on: postgres 제거 (팀 도커의 postgres-yh 사용)

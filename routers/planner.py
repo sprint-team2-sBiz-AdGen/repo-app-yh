@@ -201,6 +201,8 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                 # 마스크 로드 실패해도 계속 진행 (boxes만 사용)
         
         # Step 4: 위치 제안 생성
+        import time
+        start_time = time.time()
         try:
             result = propose_overlay_positions(
                 image=im,
@@ -211,6 +213,8 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                 max_proposals=body.max_proposals,
                 max_forbidden_iou=body.max_forbidden_iou
             )
+            latency_ms = (time.time() - start_time) * 1000
+            logger.info(f"Planner 위치 제안 생성 완료: latency={latency_ms:.2f}ms, proposals={len(result.get('proposals', []))}")
         except Exception as e:
             logger.error(f"위치 제안 생성 실패: {e}")
             raise HTTPException(status_code=500, detail=f"위치 제안 생성 중 오류가 발생했습니다: {str(e)}")
@@ -244,10 +248,10 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                 db.execute(
                     text("""
                         INSERT INTO planner_proposals (
-                            proposal_id, image_asset_id, layout, uid,
+                            proposal_id, image_asset_id, layout, latency_ms, uid,
                             created_at, updated_at
                         ) VALUES (
-                            :proposal_id, :image_asset_id, CAST(:layout AS jsonb), :uid,
+                            :proposal_id, :image_asset_id, CAST(:layout AS jsonb), :latency_ms, :uid,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                         )
                     """),
@@ -255,11 +259,12 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                         "proposal_id": proposal_id,
                         "image_asset_id": image_asset_id,
                         "layout": json.dumps(layout_data),
+                        "latency_ms": latency_ms,
                         "uid": proposal_uid
                     }
                 )
                 db.commit()
-                logger.info(f"Planner proposal saved to DB: proposal_id={proposal_id}, image_asset_id={image_asset_id}")
+                logger.info(f"Planner proposal saved to DB: proposal_id={proposal_id}, image_asset_id={image_asset_id}, latency_ms={latency_ms:.2f}")
             else:
                 logger.warning(f"Could not save planner proposal: image_asset_id not found for job_id={job_id}")
         except Exception as e:

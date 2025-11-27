@@ -21,7 +21,7 @@
 ########################################################
 
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 
 class DetectIn(BaseModel):
@@ -194,4 +194,76 @@ class JudgeOut(BaseModel):
     cta_present: bool  # CTA 존재 여부
     analysis: str  # LLaVA 분석 결과 텍스트
     issues: List[str]  # 발견된 이슈 목록
+
+
+class OCREvalIn(BaseModel):
+    """OCR 평가 요청 모델"""
+    job_id: str  # 기존 job의 ID
+    tenant_id: str
+    overlay_id: str  # overlay_layouts에서 텍스트와 이미지 URL 조회
+
+
+class OCREvalOut(BaseModel):
+    """OCR 평가 응답 모델 (DB ID 포함)"""
+    job_id: str  # UUID 문자열
+    evaluation_id: str  # UUID 문자열
+    overlay_id: str  # UUID 문자열
+    ocr_confidence: float  # OCR 신뢰도 (0.0-1.0)
+    ocr_accuracy: float  # OCR 정확도 (0.0-1.0)
+    character_match_rate: float  # 문자 일치율 (0.0-1.0)
+    recognized_text: str  # OCR로 인식된 텍스트
+    original_text: str  # 원본 텍스트
+
+
+class ReadabilityEvalIn(BaseModel):
+    """가독성 평가 요청 모델"""
+    job_id: str  # 기존 job의 ID
+    tenant_id: str
+    overlay_id: str  # overlay_layouts에서 색상 정보 조회
+
+
+class ReadabilityEvalOut(BaseModel):
+    """가독성 평가 응답 모델 (DB ID 포함)"""
+    job_id: str  # UUID 문자열
+    evaluation_id: str  # UUID 문자열
+    overlay_id: str  # UUID 문자열
+    contrast_ratio: float  # 대비 비율
+    wcag_aa_compliant: bool  # WCAG AA 기준 충족
+    wcag_aaa_compliant: bool  # WCAG AAA 기준 충족
+    readability_score: float  # 가독성 점수 (0.0-1.0)
+
+
+class IoUEvalIn(BaseModel):
+    """IoU 평가 요청 모델"""
+    job_id: str  # 기존 job의 ID
+    tenant_id: str
+    overlay_id: str  # overlay_layouts에서 텍스트 영역 좌표 조회
+
+
+class IoUEvalOut(BaseModel):
+    """IoU 평가 응답 모델 (DB ID 포함)"""
+    job_id: str  # UUID 문자열
+    evaluation_id: str  # UUID 문자열
+    overlay_id: str  # UUID 문자열
+    iou_with_food: float  # 음식과의 IoU (0.0-1.0)
+    max_iou_detection_id: Optional[str]  # 최대 IoU를 가진 detection ID
+    overlap_detected: bool  # 겹침 감지 여부
+
+
+class FullEvalIn(BaseModel):
+    """통합 평가 요청 모델"""
+    tenant_id: str
+    overlay_id: str  # overlay_layouts에서 정보 조회
+    render_asset_url: Optional[str] = None  # 하위 호환성 유지
+    evaluation_types: Optional[List[str]] = None  # ['ocr', 'readability', 'iou'] - None이면 모두 실행
+
+
+class FullEvalOut(BaseModel):
+    """통합 평가 응답 모델"""
+    tenant_id: str
+    overlay_id: str
+    render_asset_url: Optional[str] = None
+    evaluations: Dict[str, Any]  # 각 평가 타입별 결과
+    overall_score: float  # 종합 점수 (0.0-1.0)
+    execution_time_ms: float  # 전체 실행 시간
 

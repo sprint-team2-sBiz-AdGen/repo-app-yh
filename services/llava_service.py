@@ -243,6 +243,28 @@ def recommend_font(
         korean_font_note = get_korean_font_note()
     
     # 폰트 추천 프롬프트
+    korean_warning = ""
+    korean_requirements = ""
+    korean_font_list = ""
+    korean_examples = ""
+    if has_korean:
+        korean_warning = "CRITICAL: Korean text detected! You MUST recommend a Korean font name from the list below. Do NOT use generic font styles like 'sans-serif' without a specific Korean font name."
+        korean_requirements = """FOR KOREAN TEXT (한글):
+- font_name is REQUIRED and MUST be one of the Korean fonts from the list below
+- Do NOT use generic font styles without a specific Korean font name
+- font_style should match the Korean font you choose (e.g., if you choose 'Gmarket Sans', font_style should be 'sans-serif')
+- Available Korean fonts (use EXACT names):
+""" + get_font_name_list_for_llava() + """
+- Examples: 'Gmarket Sans', 'Jalnan', 'Cafe24 Classictype', 'DdangFonts Bold', etc.
+
+FOR ALL TEXT:"""
+    else:
+        korean_requirements = """FOR ALL TEXT:"""
+    
+    korean_font_example = '"Gmarket Sans"' if has_korean else '"Pretendard GOV"'
+    korean_font_comment = "REQUIRED for Korean text: Specific Korean font name from the list below. For English text: leave empty or use generic names." if has_korean else 'Specific font name (e.g., "Pretendard GOV", "Gmarket Sans", "Nanum Gothic", "Nanum Myeongjo", "Baemin Dohyeon", "Baemin Euljiro", or leave empty for auto-selection)'
+    korean_style_comment = "(for Korean text, this should match the Korean font you recommend)" if has_korean else ""
+    
     font_recommendation_prompt = f"""Based on the image analysis and ad copy, recommend the best font style, size, and color for text overlay on this advertisement image.
 
 ## Context
@@ -257,6 +279,8 @@ Recommend font properties for text overlay that will:
 3. Be appropriate for the ad copy tone
 {"4. Support Korean characters well (if Korean text is present)" if has_korean else ""}
 
+{korean_warning}
+
 IMPORTANT - Font Selection Diversity:
 - Consider MULTIPLE suitable fonts from the available list, not just one
 - Different fonts can work well for the same image - choose based on subtle nuances
@@ -266,22 +290,20 @@ IMPORTANT - Font Selection Diversity:
 ## Output Format (JSON)
 Provide your recommendation in this exact JSON format:
 {{
-  "font_style": "sans-serif",  // Choose: "serif", "sans-serif", "bold", "italic"
-  "font_name": "Pretendard GOV",  // Specific font name (e.g., "Pretendard GOV", "Gmarket Sans", "Nanum Gothic", "Nanum Myeongjo", "Baemin Dohyeon", "Baemin Euljiro", or leave empty for auto-selection)
+  "font_style": "sans-serif",  // Choose: "serif", "sans-serif", "bold", "italic" {korean_style_comment}
+  "font_name": {korean_font_example},  // {korean_font_comment}
   "font_size_category": "medium",  // Choose: "small", "medium", "large"
   "font_color_hex": "FFFFFF",  // Hex color code (without #), recommend based on background contrast
   "reasoning": "Brief explanation of why these choices fit the image and ad copy"
 }}
 
 IMPORTANT:
+{korean_requirements}
 - font_style must be one of: "serif", "sans-serif", "bold", "italic"
-- font_name: RECOMMEND a specific font name that best matches the image and ad copy style. Available fonts:
-{get_font_name_list_for_llava() if has_korean else '  * For English text: leave empty or use generic names like "Arial", "Helvetica"'}
 - font_size_category must be one of: "small", "medium", "large"
 - font_color_hex must be a 6-character hex code (e.g., "FFFFFF" for white, "000000" for black)
 - Consider background colors: if background is dark, use light text; if light, use dark text
 - Match font style to image mood: formal images → serif, casual → sans-serif, bold → bold
-{"- For Korean text: STRONGLY RECOMMEND a specific font name from the list above based on the image mood and ad copy tone" if has_korean else ""}
 - DIVERSITY: When multiple fonts could work, choose different ones to add variety and character
 - Consider the unique personality of each font: Gmarket Sans (friendly), Jalnan (bold), Cafe24 Classictype (elegant), DdangFonts (distinctive), etc.
 """
@@ -392,6 +414,14 @@ IMPORTANT:
             font_recommendation['font_size_category'] = 'medium'
         if not font_recommendation.get('font_color_hex'):
             font_recommendation['font_color_hex'] = 'FFFFFF'  # 기본값: 흰색
+        
+        # 한글 텍스트인데 font_name이 없으면 경고 및 기본값 설정
+        if has_korean and not font_recommendation.get('font_name'):
+            logger.warning(f"[폰트 추천] 한글 텍스트인데 font_name이 추출되지 않음. 기본 한글 폰트 사용: 'Gmarket Sans'")
+            font_recommendation['font_name'] = 'Gmarket Sans'  # 기본 한글 폰트
+            # font_style도 한글 폰트에 맞게 조정
+            if not font_recommendation.get('font_style'):
+                font_recommendation['font_style'] = 'sans-serif'
         
         return font_recommendation if font_recommendation else None
         
