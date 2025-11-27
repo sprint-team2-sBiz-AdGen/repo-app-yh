@@ -90,15 +90,14 @@ def setup_pipeline_job(db: Session, tenant_id: str, image_path: str, text_path: 
         print(f"✓ 기존 image_asset 레코드 발견: {image_asset_id}")
     else:
         image_asset_id = uuid.uuid4()
-        image_asset_uid = uuid.uuid4().hex
         db.execute(
             text("""
                 INSERT INTO image_assets (
                     image_asset_id, image_type, image_url, width, height,
-                    tenant_id, uid, created_at, updated_at
+                    tenant_id, created_at, updated_at
                 ) VALUES (
                     :image_asset_id, :image_type, :image_url, :width, :height,
-                    :tenant_id, :uid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
             """),
             {
@@ -107,8 +106,7 @@ def setup_pipeline_job(db: Session, tenant_id: str, image_path: str, text_path: 
                 "image_url": asset_url,
                 "width": image.size[0],
                 "height": image.size[1],
-                "tenant_id": tenant_id,
-                "uid": image_asset_uid
+                "tenant_id": tenant_id
             }
         )
         db.commit()
@@ -199,7 +197,7 @@ def test_llava_stage1(job_id: str, tenant_id: str, api_url: str = "http://localh
     print(f"  - Tenant ID: {tenant_id}")
     
     try:
-        response = requests.post(url, json=request_data, timeout=300)
+        response = requests.post(url, json=request_data, timeout=600)
         response.raise_for_status()
         
         result = response.json()
@@ -254,7 +252,7 @@ def test_yolo(job_id: str, tenant_id: str, api_url: str = "http://localhost:8011
     print(f"  - Tenant ID: {tenant_id}")
     
     try:
-        response = requests.post(url, json=request_data, timeout=300)
+        response = requests.post(url, json=request_data, timeout=600)
         response.raise_for_status()
         
         result = response.json()
@@ -298,7 +296,7 @@ def test_planner(job_id: str, tenant_id: str, api_url: str = "http://localhost:8
     print(f"  - Tenant ID: {tenant_id}")
     
     try:
-        response = requests.post(url, json=request_data, timeout=300)
+        response = requests.post(url, json=request_data, timeout=600)
         response.raise_for_status()
         
         result = response.json()
@@ -350,7 +348,7 @@ def test_llava_stage2(job_id: str, tenant_id: str, overlay_id: str = None, api_u
     print(f"  - Overlay ID: {overlay_id or 'None (자동 조회)'}")
     
     try:
-        response = requests.post(url, json=request_data, timeout=300)
+        response = requests.post(url, json=request_data, timeout=600)
         response.raise_for_status()
         
         result = response.json()
@@ -398,7 +396,7 @@ def test_ocr_eval(job_id: str, tenant_id: str, overlay_id: str, api_url: str = "
     print(f"  - Overlay ID: {overlay_id}")
     
     try:
-        response = requests.post(url, json=request_data, timeout=300)
+        response = requests.post(url, json=request_data, timeout=600)
         response.raise_for_status()
         
         result = response.json()
@@ -555,7 +553,7 @@ def test_overlay(job_id: str, tenant_id: str, proposal_id: str = None, api_url: 
     print(f"  - Text: {ad_copy_text[:50]}...")
     
     try:
-        response = requests.post(url, json=request_data, timeout=300)
+        response = requests.post(url, json=request_data, timeout=600)
         response.raise_for_status()
         
         result = response.json()

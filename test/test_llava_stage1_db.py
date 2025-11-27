@@ -132,17 +132,16 @@ def setup_test_data(db: Session, tenant_id: str, image_path: str = None) -> dict
     else:
         print(f"  새로운 image_asset 레코드 생성 중...")
         image_asset_id = uuid.uuid4()
-        image_asset_uid = uuid.uuid4().hex
         
         # Raw SQL로 직접 INSERT (FK 제약 회피)
         db.execute(
             text("""
                 INSERT INTO image_assets (
                     image_asset_id, image_type, image_url, width, height,
-                    tenant_id, uid, created_at, updated_at
+                    tenant_id, created_at, updated_at
                 ) VALUES (
                     :image_asset_id, :image_type, :image_url, :width, :height,
-                    :tenant_id, :uid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
             """),
             {
@@ -151,8 +150,7 @@ def setup_test_data(db: Session, tenant_id: str, image_path: str = None) -> dict
                 "image_url": asset_url,
                 "width": image.size[0],
                 "height": image.size[1],
-                "tenant_id": tenant_id,
-                "uid": image_asset_uid
+                "tenant_id": tenant_id
             }
         )
         db.commit()

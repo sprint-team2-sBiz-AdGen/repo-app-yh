@@ -244,14 +244,13 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                 
                 # planner_proposals에 저장 (raw SQL 사용, pk는 SERIAL로 자동 생성)
                 proposal_id = uuid.uuid4()
-                proposal_uid = uuid.uuid4().hex
                 db.execute(
                     text("""
                         INSERT INTO planner_proposals (
-                            proposal_id, image_asset_id, layout, latency_ms, uid,
+                            proposal_id, image_asset_id, layout, latency_ms,
                             created_at, updated_at
                         ) VALUES (
-                            :proposal_id, :image_asset_id, CAST(:layout AS jsonb), :latency_ms, :uid,
+                            :proposal_id, :image_asset_id, CAST(:layout AS jsonb), :latency_ms,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                         )
                     """),
@@ -259,8 +258,7 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                         "proposal_id": proposal_id,
                         "image_asset_id": image_asset_id,
                         "layout": json.dumps(layout_data),
-                        "latency_ms": latency_ms,
-                        "uid": proposal_uid
+                        "latency_ms": latency_ms
                     }
                 )
                 db.commit()

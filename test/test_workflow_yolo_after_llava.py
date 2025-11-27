@@ -95,15 +95,14 @@ def setup_test_job(db: Session, tenant_id: str, image_path: str = None) -> dict:
         print(f"✓ 기존 image_asset 레코드 발견: {image_asset_id}")
     else:
         image_asset_id = uuid.uuid4()
-        image_asset_uid = uuid.uuid4().hex
         db.execute(
             text("""
                 INSERT INTO image_assets (
                     image_asset_id, image_type, image_url, width, height,
-                    tenant_id, uid, created_at, updated_at
+                    tenant_id, created_at, updated_at
                 ) VALUES (
                     :image_asset_id, :image_type, :image_url, :width, :height,
-                    :tenant_id, :uid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
             """),
             {
@@ -112,8 +111,7 @@ def setup_test_job(db: Session, tenant_id: str, image_path: str = None) -> dict:
                 "image_url": asset_url,
                 "width": image.size[0],
                 "height": image.size[1],
-                "tenant_id": tenant_id,
-                "uid": image_asset_uid
+                "tenant_id": tenant_id
             }
         )
         db.commit()
