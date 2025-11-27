@@ -27,7 +27,7 @@ from config import PART_NAME, HOST, PORT
 from middleware import metrics_middleware, metrics_endpoint
 from routers import (
     yolo, planner, overlay, evals, llava_stage1, llava_stage2, health,
-    gpt, refined_ad_copy, ocr_eval, readability_eval, iou_eval
+    gpt, refined_ad_copy, ocr_eval, readability_eval, iou_eval, instagram_feed
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,7 @@ app.include_router(readability_eval.router)
 app.include_router(iou_eval.router)
 app.include_router(gpt.router)
 app.include_router(refined_ad_copy.router)
+app.include_router(instagram_feed.router)
 app.include_router(health.router)
 
 # 메트릭 엔드포인트

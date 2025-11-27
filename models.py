@@ -267,3 +267,23 @@ class FullEvalOut(BaseModel):
     overall_score: float  # 종합 점수 (0.0-1.0)
     execution_time_ms: float  # 전체 실행 시간
 
+
+class InstagramFeedIn(BaseModel):
+    """인스타그램 피드 글 생성 요청 모델"""
+    tenant_id: str
+    refined_ad_copy_eng: str  # 조정된 광고문구 (영어)
+    tone_style: str  # Tone + Style
+    product_description: str  # Describe Product
+    store_information: str  # Store Information
+    gpt_prompt: str  # GPT 프롬프트
+
+
+class InstagramFeedOut(BaseModel):
+    """인스타그램 피드 글 생성 응답 모델"""
+    instagram_feed_id: str  # UUID 문자열
+    tenant_id: str
+    instagram_ad_copy: str  # 인스타그램 광고문구
+    hashtags: str  # 해시태그 (예: "#태그1 #태그2 #태그3")
+    prompt_used: str  # 사용된 프롬프트
+    generated_at: str  # 생성 시간
+

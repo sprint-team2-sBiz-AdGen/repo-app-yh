@@ -16,3 +16,7 @@ bitsandbytes>=0.41.0  # 8-bit 양자화 지원 (선택사항, 메모리 절약)
 ultralytics>=8.0.0  # YOLOv8 모델 지원
 # OCR 관련
 easyocr>=1.7.0
+# GPT API 관련
+openai>=1.0.0
+# .env 파일 로드
+python-dotenv>=1.0.0
