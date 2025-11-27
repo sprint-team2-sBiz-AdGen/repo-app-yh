@@ -22,6 +22,9 @@ dependencies = [
     "ultralytics>=8.0.0",  # YOLOv8 모델 지원
     # OCR 관련
     "easyocr>=1.7.0",
+    # GPT API 관련
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [build-system]

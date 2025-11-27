@@ -27,6 +27,20 @@
 ########################################################
 
 import os
+from pathlib import Path
+
+# .env 파일 로드 (로컬 개발 환경에서만)
+# Docker 환경에서는 환경 변수가 직접 설정되므로 .env 파일 로드 불필요
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+        print(f"✓ .env 파일 로드 완료: {env_path}")
+except ImportError:
+    # python-dotenv가 설치되지 않은 경우 무시 (Docker 환경 등)
+    pass
+
 ASSETS_DIR = os.getenv("ASSETS_DIR", "/opt/feedlyai/assets")
 PART_NAME = os.getenv("PART_NAME", "yh")  # 파트 이름 (ye, yh, js, sh)
 PORT = int(os.getenv("PORT", "8011"))
@@ -84,4 +98,10 @@ if YOLO_FORBIDDEN_LABELS_ENV:
 else:
     # 기본값: None (서비스에서 기본 리스트 사용)
     YOLO_FORBIDDEN_LABELS = None
+
+# GPT API 설정
+# .env 파일의 OPENAPI_KEY를 우선 사용, 없으면 GPT_API_KEY 사용
+GPT_API_KEY = os.getenv("OPENAPI_KEY") or os.getenv("GPT_API_KEY", "")  # OpenAI API 키
+GPT_MODEL_NAME = os.getenv("GPT_MODEL_NAME", "gpt-4o-mini")  # 사용할 GPT 모델
+GPT_MAX_TOKENS = int(os.getenv("GPT_MAX_TOKENS", "1000"))  # 최대 토큰 수
 
