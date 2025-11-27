@@ -266,16 +266,17 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
                 text("""
                     INSERT INTO yolo_runs (
                         yolo_run_id, job_id, image_asset_id, forbidden_mask_url,
-                        model_name, detection_count, created_at, updated_at
+                        model_name, detection_count, latency_ms, created_at, updated_at
                     )
                     VALUES (
                         :yolo_run_id, :job_id, :image_asset_id, :forbidden_mask_url,
-                        :model_name, :detection_count, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        :model_name, :detection_count, :latency_ms, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
                     ON CONFLICT (job_id) DO UPDATE SET
                         forbidden_mask_url = EXCLUDED.forbidden_mask_url,
                         model_name = EXCLUDED.model_name,
                         detection_count = EXCLUDED.detection_count,
+                        latency_ms = EXCLUDED.latency_ms,
                         updated_at = CURRENT_TIMESTAMP
                 """),
                 {
@@ -284,11 +285,12 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
                     "image_asset_id": image_asset_id,
                     "forbidden_mask_url": forbidden_mask_url,
                     "model_name": body.model,
-                    "detection_count": len(detection_ids)
+                    "detection_count": len(detection_ids),
+                    "latency_ms": latency_ms
                 }
             )
             db.flush()
-            logger.info(f"Saved yolo_run to DB: yolo_run_id={yolo_run_id}, job_id={job_id}")
+            logger.info(f"Saved yolo_run to DB: yolo_run_id={yolo_run_id}, job_id={job_id}, latency_ms={latency_ms:.2f}")
         
         # Step 6: jobs 상태를 'done'으로 업데이트
         db.execute(

@@ -42,6 +42,7 @@ class OverlayLayout(Base):
     width_ratio = Column(Float)
     height_ratio = Column(Float)
     text_margin = Column(String(50))
+    latency_ms = Column(Float, nullable=True)  # Overlay 실행 시간 (밀리초)
     uid = Column(String(255))
     pk = Column(Integer)
     created_at = Column(DateTime(timezone=True))
@@ -148,6 +149,7 @@ class YOLORun(Base):
     forbidden_mask_url = Column(Text, nullable=True)  # 금지 영역 마스크 URL
     model_name = Column(String(255), nullable=True)  # 사용된 모델 이름
     detection_count = Column(Integer, default=0)  # 감지된 객체 개수
+    latency_ms = Column(Float, nullable=True)  # YOLO 실행 시간 (밀리초)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -160,6 +162,7 @@ class PlannerProposal(Base):
     image_asset_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"))
     prompt = Column(Text, nullable=True)
     layout = Column(JSONB, nullable=True)  # 레이아웃 정보 (전체 proposals 정보 포함)
+    latency_ms = Column(Float, nullable=True)  # Planner 실행 시간 (밀리초)
     uid = Column(String(255), unique=True, nullable=True)
     pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL
     created_at = Column(DateTime(timezone=True), server_default=func.now())

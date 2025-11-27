@@ -106,6 +106,10 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             db.rollback()
             raise HTTPException(status_code=500, detail=f"Job 상태 업데이트 중 오류가 발생했습니다: {str(e)}")
         
+        # Overlay 시작 시간 측정
+        import time
+        start_time = time.time()
+        
         # Step 1: 이미지 URL 가져오기
         variant_asset_url = body.variant_asset_url
         if not variant_asset_url:
@@ -489,6 +493,9 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         # Step 3: 오버레이된 이미지 저장
         meta = save_asset(body.tenant_id, "final", im, ".png")
         
+        # Overlay 완료 시간 측정
+        latency_ms = (time.time() - start_time) * 1000
+        
         # 최종 결과물 경로 로그 출력
         result_url = meta.get("url", "N/A")
         try:
@@ -508,8 +515,9 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         print(f"  - 절대 경로: {result_path}")
         print(f"  - 파일명: {result_filename}")
         print(f"  - 이미지 크기: {meta.get('width', 'N/A')}x{meta.get('height', 'N/A')}")
+        print(f"  - Latency: {latency_ms:.2f}ms")
         print(f"{'='*60}\n")
-        logger.info(f"[최종 결과물 저장 완료] Asset ID: {meta.get('asset_id')}, URL: {result_url}, Path: {result_path}, Size: {meta.get('width')}x{meta.get('height')}")
+        logger.info(f"[최종 결과물 저장 완료] Asset ID: {meta.get('asset_id')}, URL: {result_url}, Path: {result_path}, Size: {meta.get('width')}x{meta.get('height')}, Latency: {latency_ms:.2f}ms")
         
         # Step 4: overlay_layouts 테이블에 결과 저장
         overlay_id = None
@@ -534,11 +542,11 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                 text("""
                     INSERT INTO overlay_layouts (
                         overlay_id, proposal_id, layout, x_ratio, y_ratio,
-                        width_ratio, height_ratio, text_margin, uid,
+                        width_ratio, height_ratio, text_margin, latency_ms, uid,
                         created_at, updated_at
                     ) VALUES (
                         :overlay_id, :proposal_id, CAST(:layout AS jsonb), :x_ratio, :y_ratio,
-                        :width_ratio, :height_ratio, :text_margin, :uid,
+                        :width_ratio, :height_ratio, :text_margin, :latency_ms, :uid,
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
                 """),
@@ -551,12 +559,13 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                     "width_ratio": width_ratio if width_ratio is not None else 0.8,
                     "height_ratio": height_ratio if height_ratio is not None else 0.18,
                     "text_margin": body.margin,
+                    "latency_ms": latency_ms,
                     "uid": overlay_uid
                 }
             )
             db.commit()
             overlay_id = str(overlay_id_uuid)
-            logger.info(f"Overlay layout saved to DB: overlay_id={overlay_id}, proposal_id={body.proposal_id}")
+            logger.info(f"Overlay layout saved to DB: overlay_id={overlay_id}, proposal_id={body.proposal_id}, latency_ms={latency_ms:.2f}")
         except Exception as e:
             logger.error(f"Failed to save overlay layout to DB: {e}")
             db.rollback()

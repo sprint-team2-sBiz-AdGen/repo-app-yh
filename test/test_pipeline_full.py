@@ -818,10 +818,10 @@ def main():
     parser.add_argument("--tenant-id", default="pipeline_test_tenant",
                        help="테스트용 tenant_id")
     parser.add_argument("--image-path", type=str, 
-                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_image4.png"),
+                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_image9.png"),
                        help="사용할 이미지 경로")
     parser.add_argument("--text-path", type=str,
-                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_txt1.txt"),
+                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_txt_kor1.txt"),
                        help="사용할 텍스트 파일 경로")
     parser.add_argument("--api-url", default="http://localhost:8011",
                        help="API 서버 URL")

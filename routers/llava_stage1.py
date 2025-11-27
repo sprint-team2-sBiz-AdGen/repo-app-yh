@@ -186,13 +186,17 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             logger.info(f"Updated job_input desc_eng for job: {job_id}")
         
         # Step 5: LLaVa를 사용한 검증
+        import json
+        import time
+        start_time = time.time()
         try:
             result = validate_image_and_text(
                 image=image,
                 ad_copy_text=ad_copy_text,  # job_inputs에서 가져온 값 사용
                 validation_prompt=validation_prompt
             )
-            logger.info(f"Validation completed: is_valid={result.get('is_valid')}, score={result.get('relevance_score')}")
+            latency_ms = (time.time() - start_time) * 1000
+            logger.info(f"Validation completed: is_valid={result.get('is_valid')}, score={result.get('relevance_score')}, latency={latency_ms:.2f}ms")
         except Exception as e:
             logger.error(f"LLaVa validation failed: {str(e)}", exc_info=True)
             db.rollback()
@@ -202,8 +206,6 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             )
         
         # Step 7: vlm_traces 레코드 생성 (검증 결과 저장)
-        import json
-        import time
         vlm_trace_id = uuid.uuid4()
         
         # 요청 데이터 구성
@@ -236,7 +238,7 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
                 "operation_type": "analyze",
                 "request": json.dumps(request_data),
                 "response": json.dumps(response_data),
-                "latency_ms": None  # TODO: 실제 latency 측정 추가
+                "latency_ms": latency_ms
             }
         )
         
@@ -252,7 +254,7 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         # Step 9: 커밋
         try:
             db.commit()
-            logger.info(f"Saved to DB: job_id={job_id}, vlm_trace_id={vlm_trace_id}")
+            logger.info(f"Saved to DB: job_id={job_id}, vlm_trace_id={vlm_trace_id}, latency_ms={latency_ms:.2f}")
         except Exception as e:
             logger.error(f"Failed to commit to DB: {str(e)}", exc_info=True)
             db.rollback()
