@@ -80,44 +80,389 @@ def trigger_job_variants(job_id: str, job_variants: list):
 
 ---
 
-### 3단계: PostgreSQL 트리거 발동
+### 3단계: jobs_variants 업데이트 → 트리거 자동 실행 (DB 내부)
 
 **파일**: `db/init/03_job_variants_state_notify_trigger.sql`
 
-```sql
--- 트리거 함수
-CREATE OR REPLACE FUNCTION notify_job_variant_state_change()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF (OLD.current_step IS DISTINCT FROM NEW.current_step 
-        OR OLD.status IS DISTINCT FROM NEW.status) THEN
-        
-        PERFORM pg_notify(
-            'job_variant_state_changed',
-            json_build_object(
-                'job_variants_id', NEW.job_variants_id::text,
-                'job_id', NEW.job_id::text,
-                'current_step', NEW.current_step,
-                'status', NEW.status,
-                ...
-            )::text
-        );
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+#### 3-1. UPDATE 문 실행
 
--- 트리거 생성
+```python
+# 예시: API 엔드포인트에서 상태 업데이트
+UPDATE jobs_variants 
+SET status = 'done', 
+    current_step = 'vlm_analyze',
+    updated_at = CURRENT_TIMESTAMP
+WHERE job_variants_id = 'xxx-xxx-xxx'
+```
+
+**PostgreSQL 내부 동작**:
+1. `UPDATE` 문이 실행되면 PostgreSQL은 **트랜잭션 내에서** 다음을 수행:
+   - `OLD` 레코드: 업데이트 전 값 (`OLD.status`, `OLD.current_step`)
+   - `NEW` 레코드: 업데이트 후 값 (`NEW.status`, `NEW.current_step`)
+   - 두 값을 비교하여 변경 여부 확인
+
+#### 3-2. 트리거 자동 실행
+
+**트리거 정의**:
+```sql
 CREATE TRIGGER job_variant_state_change_trigger
     AFTER UPDATE ON jobs_variants
     FOR EACH ROW
     EXECUTE FUNCTION notify_job_variant_state_change();
 ```
 
+**트리거 실행 시점**:
+- `AFTER UPDATE`: UPDATE 문이 **성공적으로 완료된 후** 실행
+- `FOR EACH ROW`: 업데이트된 **각 행마다** 실행 (3개 variant 업데이트 시 3번 실행)
+- **트랜잭션 내부**: 트리거는 UPDATE와 같은 트랜잭션 내에서 실행됨
+
+**트리거 함수 내부 로직**:
+```sql
+CREATE OR REPLACE FUNCTION notify_job_variant_state_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- 1. 변경 감지: status 또는 current_step이 실제로 변경되었는지 확인
+    IF (OLD.current_step IS DISTINCT FROM NEW.current_step 
+        OR OLD.status IS DISTINCT FROM NEW.status) THEN
+        
+        -- 2. jobs 테이블에서 tenant_id 조회 (NOTIFY 페이로드에 포함)
+        -- 3. JSON 객체 생성
+        -- 4. pg_notify() 함수 호출로 NOTIFY 이벤트 발행
+        PERFORM pg_notify(
+            'job_variant_state_changed',  -- 채널 이름
+            json_build_object(
+                'job_variants_id', NEW.job_variants_id::text,
+                'job_id', NEW.job_id::text,
+                'current_step', NEW.current_step,
+                'status', NEW.status,
+                'img_asset_id', NEW.img_asset_id::text,
+                'tenant_id', (SELECT tenant_id FROM jobs WHERE job_id = NEW.job_id),
+                'updated_at', NEW.updated_at
+            )::text  -- JSON을 텍스트로 변환
+        );
+    END IF;
+    
+    RETURN NEW;  -- 업데이트된 레코드 반환
+END;
+$$ LANGUAGE plpgsql;
+```
+
+**중요 포인트**:
+- ✅ **트랜잭션 원자성**: 트리거는 UPDATE와 같은 트랜잭션 내에서 실행되므로, UPDATE가 롤백되면 트리거도 롤백됨
+- ✅ **변경 감지**: `IS DISTINCT FROM` 연산자로 NULL 값도 올바르게 처리
+- ✅ **성능**: 조건문으로 불필요한 NOTIFY 방지 (실제 변경이 있을 때만 발행)
+
+#### 3-3. 추가 트리거: jobs 테이블 자동 업데이트
+
+**트리거 함수**: `check_all_variants_done()`
+
+```sql
+CREATE TRIGGER check_all_variants_done_trigger
+    AFTER UPDATE ON jobs_variants
+    FOR EACH ROW
+    WHEN (NEW.status = 'done' OR NEW.status = 'failed')
+    EXECUTE FUNCTION check_all_variants_done();
+```
+
 **동작**:
-- `jobs_variants` 테이블의 `status` 또는 `current_step`이 변경되면
-- `job_variant_state_changed` 채널로 NOTIFY 이벤트 발행
-- JSON 형식으로 variant 정보 전달
+- Variant의 `status`가 `done` 또는 `failed`로 변경될 때만 실행
+- 모든 variants의 상태를 집계하여 `jobs` 테이블 자동 업데이트
+- 예: 모든 variants가 `iou_eval`, `done`이면 `jobs.status = 'done'`으로 업데이트
+
+---
+
+### 4단계: NOTIFY 이벤트 발행
+
+**PostgreSQL 내부 동작**:
+
+#### 4-1. pg_notify() 함수 실행
+
+```sql
+PERFORM pg_notify('job_variant_state_changed', '{"job_variants_id":"...", ...}')
+```
+
+**PostgreSQL 내부 처리**:
+1. **채널 등록**: `job_variant_state_changed` 채널에 이벤트 등록
+2. **메시지 큐**: PostgreSQL의 내부 메시지 큐에 이벤트 저장
+3. **리스너 알림**: 해당 채널을 `LISTEN` 중인 모든 연결에 즉시 알림
+4. **비동기 전송**: 리스너가 있으면 즉시 전송, 없으면 큐에 저장 (리스너 연결 시 전달)
+
+#### 4-2. NOTIFY 이벤트 페이로드
+
+**JSON 형식**:
+```json
+{
+  "job_variants_id": "1b859601-d08b-4755-b371-f88c2c962f52",
+  "job_id": "a709a3ad-9287-4ceb-abbf-10a86dafd8b9",
+  "current_step": "vlm_analyze",
+  "status": "done",
+  "img_asset_id": "xxx-xxx-xxx",
+  "tenant_id": "test_sequential",
+  "updated_at": "2025-11-29T00:44:39.403639+09:00"
+}
+```
+
+**특징**:
+- ✅ **텍스트 형식**: JSON을 텍스트로 변환하여 전송 (최대 8000 바이트)
+- ✅ **트랜잭션 커밋 시 전송**: 트랜잭션이 커밋되어야 리스너에 전달됨
+- ✅ **순서 보장**: 같은 트랜잭션 내에서 발행된 NOTIFY는 순서대로 전달됨
+
+---
+
+### 5단계: FastAPI 리스너가 실시간 감지
+
+**파일**: `services/job_state_listener.py`
+
+#### 5-1. 리스너 초기화 및 연결
+
+**리스너 시작** (`main.py`의 `lifespan` 함수):
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if ENABLE_JOB_STATE_LISTENER:
+        from services.job_state_listener import start_listener
+        await start_listener()  # 리스너 시작
+    yield
+    # Shutdown 시 stop_listener()
+```
+
+**리스너 연결** (`_connect_and_listen()`):
+```python
+async def _connect_and_listen(self):
+    # 1. PostgreSQL 연결 (asyncpg 사용)
+    asyncpg_url = DATABASE_URL.replace("postgresql://", "postgres://")
+    self.conn = await asyncpg.connect(asyncpg_url)
+    
+    # 2. LISTEN 시작 (채널 구독)
+    await self.conn.add_listener(
+        'job_variant_state_changed', 
+        self._handle_variant_notification
+    )
+    
+    # 3. 무한 루프로 대기 (연결 유지)
+    while self.running:
+        await asyncio.sleep(1)
+```
+
+**연결 특징**:
+- ✅ **영구 연결**: FastAPI 서버가 실행되는 동안 계속 유지
+- ✅ **비동기 I/O**: `asyncpg`를 사용하여 논블로킹 방식으로 동작
+- ✅ **자동 재연결**: 연결이 끊기면 자동으로 재연결 시도
+
+#### 5-2. NOTIFY 이벤트 수신
+
+**이벤트 핸들러** (`_handle_variant_notification()`):
+```python
+def _handle_variant_notification(self, conn, pid, channel, payload):
+    """NOTIFY 이벤트 핸들러 (동기 함수)"""
+    try:
+        # 1. JSON 페이로드 파싱
+        data = json.loads(payload)
+        
+        # 2. 데이터 추출
+        job_variants_id = data.get('job_variants_id')
+        job_id = data.get('job_id')
+        current_step = data.get('current_step')
+        status = data.get('status')
+        tenant_id = data.get('tenant_id')
+        img_asset_id = data.get('img_asset_id')
+        
+        # 3. 로깅
+        logger.info(
+            f"Job Variant 상태 변화 감지: "
+            f"job_variants_id={job_variants_id}, "
+            f"job_id={job_id}, "
+            f"current_step={current_step}, "
+            f"status={status}"
+        )
+        
+        # 4. 비동기 태스크로 처리 (이벤트 핸들러는 동기 함수이므로)
+        task = asyncio.create_task(
+            self._process_job_variant_state_change(
+                job_variants_id=job_variants_id,
+                job_id=job_id,
+                current_step=current_step,
+                status=status,
+                tenant_id=tenant_id,
+                img_asset_id=img_asset_id
+            )
+        )
+        # 태스크 추적 (종료 시 완료 대기)
+        self.pending_tasks.add(task)
+        task.add_done_callback(self.pending_tasks.discard)
+        
+    except Exception as e:
+        logger.error(f"이벤트 처리 오류: {e}", exc_info=True)
+```
+
+**이벤트 수신 특징**:
+- ✅ **실시간**: PostgreSQL이 NOTIFY를 발행하면 **즉시** 수신 (폴링 지연 없음)
+- ✅ **비동기 처리**: 이벤트 핸들러는 동기 함수이지만, 실제 처리는 비동기 태스크로 실행
+- ✅ **병렬 처리**: 여러 NOTIFY 이벤트가 동시에 발생해도 각각 독립적으로 처리
+
+#### 5-3. 상태 변화 처리
+
+**처리 함수** (`_process_job_variant_state_change()`):
+```python
+async def _process_job_variant_state_change(
+    self,
+    job_variants_id: str,
+    job_id: str,
+    current_step: Optional[str],
+    status: str,
+    tenant_id: str,
+    img_asset_id: str
+):
+    """Job Variant 상태 변화 처리 및 다음 단계 트리거"""
+    try:
+        from services.pipeline_trigger import trigger_next_pipeline_stage_for_variant
+        
+        # 파이프라인 트리거 호출
+        await trigger_next_pipeline_stage_for_variant(
+            job_variants_id=job_variants_id,
+            job_id=job_id,
+            current_step=current_step,
+            status=status,
+            tenant_id=tenant_id,
+            img_asset_id=img_asset_id
+        )
+    except Exception as e:
+        logger.error(
+            f"파이프라인 트리거 오류: job_variants_id={job_variants_id}, error={e}",
+            exc_info=True
+        )
+```
+
+---
+
+### 6단계: 파이프라인 트리거
+
+**파일**: `services/pipeline_trigger.py`
+
+#### 6-1. 다음 단계 결정
+
+**함수**: `trigger_next_pipeline_stage_for_variant()`
+
+```python
+async def trigger_next_pipeline_stage_for_variant(
+    job_variants_id: str,
+    job_id: str,
+    current_step: Optional[str],
+    status: str,
+    tenant_id: str,
+    img_asset_id: str
+):
+    # 1. 파이프라인 단계 매핑에서 다음 단계 조회
+    stage_info = PIPELINE_STAGES.get((current_step, status))
+    
+    if not stage_info:
+        logger.warning(f"다음 단계를 찾을 수 없음: {current_step}, {status}")
+        return
+    
+    next_step = stage_info['next_step']
+    api_endpoint = stage_info['api_endpoint']
+    method = stage_info['method']
+```
+
+**파이프라인 단계 매핑**:
+```python
+PIPELINE_STAGES = {
+    ('img_gen', 'done'): {
+        'next_step': 'vlm_analyze',
+        'api_endpoint': '/api/yh/llava/stage1/validate',
+        'method': 'POST',
+    },
+    ('vlm_analyze', 'done'): {
+        'next_step': 'yolo_detect',
+        'api_endpoint': '/api/yh/yolo/detect',
+        'method': 'POST',
+    },
+    ('yolo_detect', 'done'): {
+        'next_step': 'planner',
+        'api_endpoint': '/api/yh/planner',
+        'method': 'POST',
+    },
+    # ... (계속)
+}
+```
+
+#### 6-2. 필요한 데이터 조회
+
+**overlay_id 조회** (필요한 경우):
+```python
+if stage_info.get('needs_overlay_id'):
+    overlay_id = await _get_overlay_id_from_job_variant(job_variants_id)
+    if not overlay_id:
+        logger.warning(f"overlay_id를 찾을 수 없어 {next_step} 트리거를 건너뜁니다")
+        return
+```
+
+**텍스트 및 proposal_id 조회** (필요한 경우):
+```python
+if stage_info.get('needs_text_and_proposal'):
+    text, proposal_id = await _get_text_and_proposal_from_job_variant(job_variants_id)
+```
+
+#### 6-3. API 엔드포인트 호출
+
+**HTTP 요청**:
+```python
+# 3. API 호출
+try:
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        response = await client.post(
+            f"http://localhost:8000{api_endpoint}",
+            json={
+                "job_variants_id": job_variants_id,
+                "overlay_id": overlay_id if stage_info.get('needs_overlay_id') else None,
+                "text": text if stage_info.get('needs_text_and_proposal') else None,
+                "proposal_id": proposal_id if stage_info.get('needs_text_and_proposal') else None,
+                # ... (기타 필수 파라미터)
+            }
+        )
+        response.raise_for_status()
+        logger.info(
+            f"[TRIGGER] 파이프라인 단계 트리거 (variant): "
+            f"job_variants_id={job_variants_id}, next_step={next_step}"
+        )
+except httpx.HTTPError as e:
+    logger.error(
+        f"파이프라인 단계 실행 실패 (variant): "
+        f"job_variants_id={job_variants_id}, next_step={next_step}, error={e}"
+    )
+    # 실패 시 variant 상태를 'failed'로 업데이트
+    await _update_variant_status(job_variants_id, 'failed')
+```
+
+**API 호출 특징**:
+- ✅ **비동기**: `httpx.AsyncClient`를 사용하여 논블로킹 방식
+- ✅ **타임아웃**: 300초 타임아웃 설정 (LLaVA 모델 로딩 시간 고려)
+- ✅ **에러 처리**: 실패 시 variant 상태를 `failed`로 업데이트
+
+#### 6-4. 순환 구조 완성
+
+**다음 단계 실행 후**:
+1. API 엔드포인트가 실행 완료
+2. `jobs_variants` 테이블 업데이트 (`status = 'done'`, `current_step = next_step`)
+3. **다시 3단계로 돌아가서** 트리거가 자동 발동
+4. 다음 단계로 자동 진행
+
+**전체 흐름**:
+```
+jobs_variants 업데이트 
+  ↓
+트리거 자동 실행 (DB 내부)
+  ↓
+NOTIFY 이벤트 발행
+  ↓
+FastAPI 리스너가 실시간 감지
+  ↓
+파이프라인 트리거
+  ↓
+API 엔드포인트 호출
+  ↓
+jobs_variants 업데이트 (다시 처음으로)
+```
 
 ---
 
