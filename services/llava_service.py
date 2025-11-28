@@ -14,7 +14,7 @@
 # updated_at: 2025-11-20
 # author: LEEYH205
 # description: LLaVa model service
-# version: 0.1.0
+# version: 2.0.0
 # status: development
 # tags: llava, model, service
 # dependencies: transformers, torch, accelerate, pillow
@@ -25,6 +25,7 @@
 import os
 import re
 import logging
+import threading
 from typing import Optional, Dict, Any
 from PIL import Image
 import torch
@@ -39,102 +40,107 @@ DEVICE = DEVICE_TYPE if DEVICE_TYPE == "cuda" and torch.cuda.is_available() else
 # 전역 모델 변수 (lazy loading)
 _processor: Optional[LlavaProcessor] = None
 _model: Optional[LlavaForConditionalGeneration] = None
+_model_lock = threading.Lock()  # 모델 로딩 동기화를 위한 락
 
 
 def get_llava_model():
-    """LLaVa 모델 및 프로세서 로드 (싱글톤 패턴)"""
+    """LLaVa 모델 및 프로세서 로드 (싱글톤 패턴, thread-safe)"""
     global _processor, _model
     
+    # Double-checked locking 패턴으로 thread-safe하게 모델 로딩
     if _model is None or _processor is None:
-        print(f"Loading LLaVa model: {LLAVA_MODEL_NAME} on {DEVICE}")
-        print(f"Model will be saved to: {MODEL_DIR}")
-        
-        # Hugging Face 캐시 디렉토리를 model 폴더로 설정
-        # transformers는 cache_dir 내에 models--{org}--{model-name} 구조로 저장
-        os.environ["HF_HOME"] = MODEL_DIR
-        os.environ["TRANSFORMERS_CACHE"] = MODEL_DIR
-        
-        # 프로세서 로드 (자동으로 MODEL_DIR에 캐시됨)
-        print(f"Downloading/loading processor from Hugging Face...")
-        _processor = LlavaProcessor.from_pretrained(
-            LLAVA_MODEL_NAME,
-            cache_dir=MODEL_DIR
-        )
-        
-        # 모델 로드 (자동으로 MODEL_DIR에 캐시됨)
-        print(f"Downloading/loading model from Hugging Face...")
-        print(f"Quantization setting: {'Enabled (8-bit)' if USE_QUANTIZATION else 'Disabled (FP16/FP32)'}")
-        
-        # GPU 메모리 사용량 측정 (로드 전)
-        if DEVICE == "cuda":
-            torch.cuda.reset_peak_memory_stats()
-            initial_memory = torch.cuda.memory_allocated() / 1024**3  # GB
-        
-        # 메모리 최적화: 8-bit 양자화 사용 여부에 따라 선택
-        if DEVICE == "cuda" and USE_QUANTIZATION:
-            try:
-                from transformers import BitsAndBytesConfig
-                quantization_config = BitsAndBytesConfig(
-                    load_in_8bit=True,
-                    bnb_8bit_compute_dtype=torch.float16
-                )
-                _model = LlavaForConditionalGeneration.from_pretrained(
+        with _model_lock:
+            # 다시 확인 (다른 스레드가 이미 로딩했을 수 있음)
+            if _model is None or _processor is None:
+                print(f"Loading LLaVa model: {LLAVA_MODEL_NAME} on {DEVICE}")
+                print(f"Model will be saved to: {MODEL_DIR}")
+                
+                # Hugging Face 캐시 디렉토리를 model 폴더로 설정
+                # transformers는 cache_dir 내에 models--{org}--{model-name} 구조로 저장
+                os.environ["HF_HOME"] = MODEL_DIR
+                os.environ["TRANSFORMERS_CACHE"] = MODEL_DIR
+                
+                # 프로세서 로드 (자동으로 MODEL_DIR에 캐시됨)
+                print(f"Downloading/loading processor from Hugging Face...")
+                _processor = LlavaProcessor.from_pretrained(
                     LLAVA_MODEL_NAME,
-                    quantization_config=quantization_config,
-                    device_map="auto",
-                    low_cpu_mem_usage=True,
                     cache_dir=MODEL_DIR
                 )
-                print("✓ Model loaded with 8-bit quantization for memory efficiency")
-            except Exception as e:
-                print(f"⚠ 8-bit quantization failed: {e}")
-                print("Falling back to standard loading with memory limits...")
-                # 8-bit 양자화 실패 시 메모리 제한과 함께 로드
-                _model = LlavaForConditionalGeneration.from_pretrained(
-                    LLAVA_MODEL_NAME,
-                    torch_dtype=torch.float16,
-                    device_map="auto",
-                    low_cpu_mem_usage=True,
-                    cache_dir=MODEL_DIR,
-                    max_memory={0: "20GiB"}  # GPU 메모리 제한
-                )
-                print("✓ Model loaded with FP16 (quantization disabled)")
-        elif DEVICE == "cuda":
-            # 양자화 비활성화: FP16으로 로드
-            _model = LlavaForConditionalGeneration.from_pretrained(
-                LLAVA_MODEL_NAME,
-                torch_dtype=torch.float16,
-                device_map="auto",
-                low_cpu_mem_usage=True,
-                cache_dir=MODEL_DIR
-            )
-            print("✓ Model loaded with FP16 (quantization disabled)")
-        else:
-            # CPU 모드
-            _model = LlavaForConditionalGeneration.from_pretrained(
-                LLAVA_MODEL_NAME,
-                torch_dtype=torch.float32,
-                device_map=None,
-                low_cpu_mem_usage=True,
-                cache_dir=MODEL_DIR
-            )
-            _model = _model.to(DEVICE)
-            print("✓ Model loaded on CPU")
-        
-        # GPU 메모리 사용량 측정 (로드 후)
-        if DEVICE == "cuda":
-            loaded_memory = torch.cuda.memory_allocated() / 1024**3  # GB
-            peak_memory = torch.cuda.max_memory_allocated() / 1024**3  # GB
-            total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
-            print(f"📊 GPU Memory Usage:")
-            print(f"   - Allocated: {loaded_memory:.2f} GB")
-            print(f"   - Peak (during load): {peak_memory:.2f} GB")
-            print(f"   - Total GPU: {total_memory:.2f} GB")
-            print(f"   - Usage: {loaded_memory/total_memory*100:.1f}%")
-        
-        _model.eval()
-        print(f"✓ LLaVa model loaded successfully on {DEVICE}")
-        print(f"✓ Model cached in: {MODEL_DIR}")
+                
+                # 모델 로드 (자동으로 MODEL_DIR에 캐시됨)
+                print(f"Downloading/loading model from Hugging Face...")
+                print(f"Quantization setting: {'Enabled (8-bit)' if USE_QUANTIZATION else 'Disabled (FP16/FP32)'}")
+                
+                # GPU 메모리 사용량 측정 (로드 전)
+                if DEVICE == "cuda":
+                    torch.cuda.reset_peak_memory_stats()
+                    initial_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+                
+                # 메모리 최적화: 8-bit 양자화 사용 여부에 따라 선택
+                if DEVICE == "cuda" and USE_QUANTIZATION:
+                    try:
+                        from transformers import BitsAndBytesConfig
+                        quantization_config = BitsAndBytesConfig(
+                            load_in_8bit=True,
+                            bnb_8bit_compute_dtype=torch.float16
+                        )
+                        _model = LlavaForConditionalGeneration.from_pretrained(
+                            LLAVA_MODEL_NAME,
+                            quantization_config=quantization_config,
+                            device_map="auto",
+                            low_cpu_mem_usage=True,
+                            cache_dir=MODEL_DIR
+                        )
+                        print("✓ Model loaded with 8-bit quantization for memory efficiency")
+                    except Exception as e:
+                        print(f"⚠ 8-bit quantization failed: {e}")
+                        print("Falling back to standard loading with memory limits...")
+                        # 8-bit 양자화 실패 시 메모리 제한과 함께 로드
+                        _model = LlavaForConditionalGeneration.from_pretrained(
+                            LLAVA_MODEL_NAME,
+                            torch_dtype=torch.float16,
+                            device_map="auto",
+                            low_cpu_mem_usage=True,
+                            cache_dir=MODEL_DIR,
+                            max_memory={0: "20GiB"}  # GPU 메모리 제한
+                        )
+                        print("✓ Model loaded with FP16 (quantization disabled)")
+                elif DEVICE == "cuda":
+                    # 양자화 비활성화: FP16으로 로드
+                    _model = LlavaForConditionalGeneration.from_pretrained(
+                        LLAVA_MODEL_NAME,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        low_cpu_mem_usage=True,
+                        cache_dir=MODEL_DIR
+                    )
+                    print("✓ Model loaded with FP16 (quantization disabled)")
+                else:
+                    # CPU 모드
+                    _model = LlavaForConditionalGeneration.from_pretrained(
+                        LLAVA_MODEL_NAME,
+                        torch_dtype=torch.float32,
+                        device_map=None,
+                        low_cpu_mem_usage=True,
+                        cache_dir=MODEL_DIR
+                    )
+                    _model = _model.to(DEVICE)
+                    print("✓ Model loaded on CPU")
+                
+                # GPU 메모리 사용량 측정 (로드 후)
+                if DEVICE == "cuda":
+                    loaded_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+                    peak_memory = torch.cuda.max_memory_allocated() / 1024**3  # GB
+                    total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+                    print(f"📊 GPU Memory Usage:")
+                    print(f"   - Allocated: {loaded_memory:.2f} GB")
+                    print(f"   - Peak (during load): {peak_memory:.2f} GB")
+                    print(f"   - Total GPU: {total_memory:.2f} GB")
+                    print(f"   - Usage: {loaded_memory/total_memory*100:.1f}%")
+                
+                _model.eval()
+                print(f"✓ LLaVa model loaded successfully on {DEVICE}")
+                print(f"✓ Model cached in: {MODEL_DIR}")
     
     return _processor, _model
 

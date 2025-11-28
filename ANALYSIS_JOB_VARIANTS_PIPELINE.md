@@ -1,29 +1,39 @@
-# Job Variants 기반 파이프라인 변경 분석
+# Job Variants 기반 파이프라인 구현 문서
 
-## 🎯 핵심 결정 사항
+## 🎯 핵심 결정 사항 (최종)
 
-### ✅ 최종 결정: 옵션 C (하이브리드)
-- **Job 상태 관리**: `jobs` 테이블은 ye 파트에서 yh 파트 시작 시 업데이트, yh 파트 진행 중에는 `jobs_variants`만 업데이트, 모든 variants 완료 시 `jobs` 자동 업데이트
-    - ye 파트 → yh 파트 시작: jobs.current_step = 'vlm_analyze' 설정
-    - yh 파트 진행 중: jobs_variants 테이블만 업데이트
-    - 모든 variants 완료: 트리거로 jobs.status = 'done', jobs.current_step = 'iou_eval' 자동 업데이트
-- **트리거 전략**: `jobs_variants` 테이블만 트리거 사용
-- **하위 호환성**: `job_variants_id`는 **필수** (옵션 B)
-- **실행 방식**: **병렬 실행** (옵션 A) - GCP VM 성능 테스트 필요
+### ✅ 최종 결정: 옵션 C (하이브리드) - **구현 완료**
+
+#### 1. Job 상태 관리
+- **ye 파트 → yh 파트 시작**: `jobs.current_step = 'vlm_analyze'`, `jobs.status = 'running'` 설정
+- **yh 파트 진행 중**: `jobs_variants` 테이블만 업데이트
+- **매 단계 완료 시**: 모든 variants가 같은 단계에서 `done`이면 `jobs.current_step = 해당 단계`로 자동 업데이트
+- **최종 완료**: 모든 variants가 `iou_eval` 단계에서 `done`이면 `jobs.status = 'done'`, `jobs.current_step = 'iou_eval'` 자동 업데이트
+
+#### 2. 트리거 전략
+- **`jobs_variants` 테이블 트리거 사용**
+- `job_variant_state_changed` 채널로 NOTIFY 발행
+- 매 단계마다 모든 variants 완료 여부 확인하여 `jobs` 테이블 업데이트
+
+#### 3. 하위 호환성
+- **`job_variants_id`는 필수 파라미터**
+- 모든 API 엔드포인트에서 `job_variants_id` 필수로 검증
+
+#### 4. 실행 방식
+- **병렬 실행**: 같은 `job_id`의 여러 variant를 병렬로 처리
+- Thread-safe 모델 로딩 구현 (Double-checked locking 패턴)
 
 ---
 
-## 📋 현재 상황
+## 📋 구현 완료 사항
 
-### 현재 구조
-- **Job ID 기준**: 하나의 `job_id`에 대해 파이프라인이 한 번 실행됨
-- **Job Variants**: 하나의 `job_id`에 대해 `jobs_variants` 테이블에 3개의 variant가 생성됨
-- **문제**: 각 variant마다 파이프라인을 실행해야 하는데, 현재는 job_id 기준으로만 실행됨
-
-### 요구사항
-- **Job ID 하나당**: 3개의 variant가 생성됨
-- **각 Variant마다**: 파이프라인을 독립적으로 실행해야 함
-- **결과**: Job ID 하나당 파이프라인이 3번 실행되어야 함
+### ✅ 완료된 작업
+1. **스키마 변경**: `jobs_variants` 테이블에 `status`, `current_step`, `updated_at` 컬럼 추가
+2. **트리거 구현**: `jobs_variants` 테이블 트리거 생성 (매 단계마다 `jobs` 테이블 업데이트)
+3. **API 엔드포인트 수정**: 모든 8개 엔드포인트에 `job_variants_id` 필수 파라미터 추가
+4. **파이프라인 트리거**: `job_variants_id` 기반 파이프라인 트리거 구현
+5. **리스너**: `job_variant_state_changed` 채널 리스너 추가
+6. **Thread-safe 모델 로딩**: LLaVA 모델 로딩 시 동시 접근 방지 (threading.Lock 사용)
 
 ---
 
@@ -42,7 +52,7 @@ CREATE TABLE jobs (
 );
 ```
 
-#### `jobs_variants` 테이블 (현재)
+#### `jobs_variants` 테이블 (구현 완료)
 ```sql
 CREATE TABLE jobs_variants (
     job_variants_id UUID PRIMARY KEY,
@@ -50,13 +60,22 @@ CREATE TABLE jobs_variants (
     img_asset_id UUID REFERENCES image_assets(image_asset_id),
     creation_order INTEGER NOT NULL,
     selected BOOLEAN DEFAULT FALSE,
-    ...
+    status TEXT DEFAULT 'queued',  -- queued, running, done, failed
+    current_step TEXT DEFAULT 'vlm_analyze',  -- 파이프라인 단계
+    pk SERIAL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 인덱스
+CREATE INDEX idx_jobs_variants_status ON jobs_variants(status);
+CREATE INDEX idx_jobs_variants_current_step ON jobs_variants(current_step);
+CREATE INDEX idx_jobs_variants_job_id_status ON jobs_variants(job_id, status);
 ```
 
-**현재 문제점**:
-- `jobs_variants` 테이블에 `current_step`, `status` 컬럼이 없음
-- 각 variant의 파이프라인 진행 상황을 추적할 수 없음
+**구현 완료**:
+- ✅ `status`, `current_step`, `updated_at` 컬럼 추가
+- ✅ 각 variant의 파이프라인 진행 상황 추적 가능
 
 ---
 
@@ -87,110 +106,35 @@ Job ID: job-123
 
 ---
 
-## 🎯 해결 방안 분석
+## 🎯 구현 완료된 해결 방안
 
-### 옵션 1: `jobs_variants` 테이블에 상태 컬럼 추가 (권장)
+### ✅ 선택된 방안: `jobs_variants` 테이블에 상태 컬럼 추가
 
-#### 변경 사항
+**구현 완료 사항**:
+1. ✅ 스키마 변경: `status`, `current_step`, `updated_at` 컬럼 추가
+2. ✅ 트리거 구현: `jobs_variants` 테이블 트리거 생성
+3. ✅ 파이프라인 트리거 로직 변경: `job_variants_id` 기준으로 변경
+4. ✅ 모든 API 엔드포인트 수정: `job_variants_id` 필수 파라미터 추가
 
-**1. 스키마 변경**
-```sql
-ALTER TABLE jobs_variants 
-ADD COLUMN status TEXT DEFAULT 'queued',  -- queued, running, done, failed
-ADD COLUMN current_step TEXT,  -- 'vlm_analyze', 'yolo_detect', 'planner', etc.
-ADD COLUMN updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
-```
-
-**2. 트리거 변경**
-- `jobs` 테이블 트리거 → `jobs_variants` 테이블 트리거로 변경
-- 또는 두 테이블 모두에 트리거 생성
-
-**3. 파이프라인 트리거 로직 변경**
-- `job_id` 기준 → `job_variants_id` 기준으로 변경
-- 각 variant별로 독립적인 파이프라인 실행
-
-**장점**:
+**구현 결과**:
 - ✅ 각 variant별로 독립적인 상태 관리
 - ✅ variant별로 독립적인 파이프라인 진행 추적
 - ✅ 기존 `jobs` 테이블 구조 유지 (다른 파트와 호환성)
-- ✅ variant별로 선택적으로 실행 가능
-
-**단점**:
-- ❌ 스키마 변경 필요
-- ❌ 트리거 변경 필요
-- ❌ 모든 API 엔드포인트 수정 필요 (`job_id` → `job_variants_id`)
+- ✅ 병렬 실행 지원 (thread-safe 모델 로딩)
 
 ---
 
-### 옵션 2: `job_variants_id`를 파라미터로 추가 (하이브리드)
+## 🔧 구현 완료 사항
 
-#### 변경 사항
+### ✅ 1단계: 스키마 변경 (완료)
 
-**1. 스키마 변경 없음**
-- `jobs_variants` 테이블에 상태 컬럼 추가하지 않음
-- `jobs` 테이블의 `current_step`, `status`를 variant별로 관리
-
-**2. 파이프라인 트리거 로직 변경**
-- `job_id` + `job_variants_id` 조합으로 파이프라인 실행
-- 각 variant별로 순차적으로 또는 병렬로 실행
-
-**3. API 엔드포인트 변경**
-- 모든 API에 `job_variants_id` 파라미터 추가 (Optional)
-- `job_variants_id`가 있으면 해당 variant의 이미지 사용
-- 없으면 기존처럼 `job_inputs`의 이미지 사용
-
-**장점**:
-- ✅ 스키마 변경 최소화
-- ✅ 기존 로직과 호환성 유지 가능
-
-**단점**:
-- ❌ `jobs` 테이블의 `current_step`, `status`를 variant별로 관리하기 어려움
-- ❌ 어떤 variant가 현재 실행 중인지 추적 어려움
-- ❌ 복잡한 상태 관리 로직 필요
-
----
-
-### 옵션 3: Variant별로 별도의 Job 생성
-
-#### 변경 사항
-
-**1. 스키마 변경 없음**
-- 기존 테이블 구조 유지
-
-**2. 로직 변경**
-- `jobs_variants`가 생성될 때 각 variant마다 별도의 `job_id` 생성
-- 각 `job_id`는 독립적인 파이프라인 실행
-
-**장점**:
-- ✅ 기존 파이프라인 로직 그대로 사용 가능
-- ✅ 스키마 변경 없음
-
-**단점**:
-- ❌ `job_id` 관리 복잡 (원본 job과 variant job 구분 필요)
-- ❌ 데이터 중복 가능성
-- ❌ 다른 파트(js, ye)와의 호환성 문제
-
----
-
-## 💡 권장 방안: 옵션 1 (jobs_variants에 상태 컬럼 추가)
-
-### 이유
-1. **명확한 상태 관리**: 각 variant별로 독립적인 상태 추적 가능
-2. **확장성**: 향후 variant별 선택적 실행, 우선순위 설정 등 가능
-3. **호환성**: 기존 `jobs` 테이블 구조 유지 (다른 파트와 호환)
-4. **트리거 활용**: PostgreSQL 트리거를 variant 기준으로 활용 가능
-
----
-
-## 🔧 구현 계획
-
-### 1단계: 스키마 변경
+**파일**: `db/init/01_schema.sql`
 
 ```sql
 -- jobs_variants 테이블에 상태 컬럼 추가
 ALTER TABLE jobs_variants 
 ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'queued',
-ADD COLUMN IF NOT EXISTS current_step TEXT,
+ADD COLUMN IF NOT EXISTS current_step TEXT DEFAULT 'vlm_analyze',
 ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 
 -- 인덱스 추가
@@ -199,112 +143,51 @@ CREATE INDEX IF NOT EXISTS idx_jobs_variants_current_step ON jobs_variants(curre
 CREATE INDEX IF NOT EXISTS idx_jobs_variants_job_id_status ON jobs_variants(job_id, status);
 ```
 
-### 2단계: 트리거 변경
+### ✅ 2단계: 트리거 구현 (완료)
 
-#### 옵션 A: jobs_variants 테이블에 트리거 추가 (권장)
-```sql
--- jobs_variants 테이블용 트리거 함수
-CREATE OR REPLACE FUNCTION notify_job_variant_state_change()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF (OLD.current_step IS DISTINCT FROM NEW.current_step 
-       OR OLD.status IS DISTINCT FROM NEW.status) THEN
-        PERFORM pg_notify('job_variant_state_changed', 
-            json_build_object(
-                'job_variants_id', NEW.job_variants_id,
-                'job_id', NEW.job_id,
-                'current_step', NEW.current_step,
-                'status', NEW.status,
-                'img_asset_id', NEW.img_asset_id
-            )::text
-        );
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+**파일**: `db/init/03_job_variants_state_notify_trigger.sql`
 
--- 트리거 생성
-CREATE TRIGGER job_variant_state_change_trigger
-    AFTER UPDATE ON jobs_variants
-    FOR EACH ROW
-    WHEN (OLD.current_step IS DISTINCT FROM NEW.current_step 
-       OR OLD.status IS DISTINCT FROM NEW.status)
-    EXECUTE FUNCTION notify_job_variant_state_change();
-```
+#### 트리거 1: NOTIFY 발행
+- `job_variant_state_changed` 채널로 상태 변화 알림
 
-#### 옵션 B: jobs 테이블 트리거 유지 + jobs_variants 트리거 추가
-- 두 테이블 모두에 트리거 생성
-- 리스너가 두 채널 모두 수신
+#### 트리거 2: jobs 테이블 자동 업데이트
+- **매 단계마다**: 모든 variants가 같은 단계에서 `done`이면 `jobs.current_step = 해당 단계`로 업데이트
+- **최종 완료**: 모든 variants가 `iou_eval` 단계에서 `done`이면 `jobs.status = 'done'`, `jobs.current_step = 'iou_eval'`로 업데이트
+- **img_gen 단계 제외**: 파이프라인 시작 전 단계이므로 `jobs` 테이블 업데이트 안 함
 
-### 3단계: 파이프라인 트리거 로직 변경
+### ✅ 3단계: 파이프라인 트리거 로직 변경 (완료)
 
-#### 변경 전
-```python
-# job_id 기준으로 파이프라인 실행
-trigger_next_pipeline_stage(job_id, current_step, status, tenant_id)
-```
+**파일**: `services/pipeline_trigger.py`
 
-#### 변경 후
-```python
-# job_variants_id 기준으로 파이프라인 실행
-trigger_next_pipeline_stage(
-    job_variants_id=job_variants_id,
-    job_id=job_id,  # 참조용
-    current_step=current_step,
-    status=status,
-    tenant_id=tenant_id
-)
-```
+- ✅ `trigger_next_pipeline_stage_for_variant()` 함수 추가
+- ✅ `job_variants_id` 기반으로 파이프라인 실행
+- ✅ `_get_overlay_id_from_job_variant()`, `_get_text_and_proposal_from_job_variant()` 함수 추가
 
-### 4단계: API 엔드포인트 변경
+### ✅ 4단계: API 엔드포인트 변경 (완료)
 
-모든 API 엔드포인트에 `job_variants_id` 파라미터 추가:
+**파일**: `models.py`, `routers/*.py`
 
-```python
-class LLaVaStage1In(BaseModel):
-    job_id: str  # 유지 (참조용)
-    job_variants_id: str  # 추가 (필수)
-    tenant_id: str
-    # ...
-```
+**변경된 엔드포인트 (8개)**:
+1. ✅ `llava_stage1.py` - `LLaVaStage1In`에 `job_variants_id` 필수 추가
+2. ✅ `yolo.py` - `DetectIn`에 `job_variants_id` 필수 추가
+3. ✅ `planner.py` - `PlannerIn`에 `job_variants_id` 필수 추가
+4. ✅ `overlay.py` - `OverlayIn`에 `job_variants_id` 필수 추가
+5. ✅ `llava_stage2.py` - `JudgeIn`에 `job_variants_id` 필수 추가
+6. ✅ `ocr_eval.py` - `OCREvalIn`에 `job_variants_id` 필수 추가
+7. ✅ `readability_eval.py` - `ReadabilityEvalIn`에 `job_variants_id` 필수 추가
+8. ✅ `iou_eval.py` - `IoUEvalIn`에 `job_variants_id` 필수 추가
 
-**이미지 조회 로직 변경**:
-```python
-# 변경 전: job_inputs에서 이미지 조회
-job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
-img_asset_id = job_input.img_asset_id
+**변경 사항**:
+- ✅ 모든 Input 모델에 `job_variants_id: str` 필수 필드 추가
+- ✅ 이미지 조회: `job_inputs` → `jobs_variants.img_asset_id`
+- ✅ 상태 업데이트: `jobs` → `jobs_variants`
 
-# 변경 후: jobs_variants에서 이미지 조회
-job_variant = db.query(JobVariant).filter(
-    JobVariant.job_variants_id == job_variants_id
-).first()
-img_asset_id = job_variant.img_asset_id
-```
+### ✅ 5단계: Job 상태 업데이트 로직 변경 (완료)
 
-### 5단계: Job 상태 업데이트 로직 변경
-
-#### 변경 전
-```python
-# jobs 테이블 업데이트
-db.execute(text("""
-    UPDATE jobs 
-    SET status = 'running', 
-        current_step = 'vlm_analyze'
-    WHERE job_id = :job_id
-"""), {"job_id": job_id})
-```
-
-#### 변경 후
-```python
-# jobs_variants 테이블 업데이트
-db.execute(text("""
-    UPDATE jobs_variants 
-    SET status = 'running', 
-        current_step = 'vlm_analyze',
-        updated_at = CURRENT_TIMESTAMP
-    WHERE job_variants_id = :job_variants_id
-"""), {"job_variants_id": job_variants_id})
-```
+**변경 사항**:
+- ✅ 모든 엔드포인트에서 `jobs_variants` 테이블만 업데이트
+- ✅ 각 단계 완료 시 `jobs_variants.status = 'done'`, `jobs_variants.current_step = 해당 단계`
+- ✅ 트리거가 자동으로 `jobs` 테이블 업데이트 (매 단계마다)
 
 ---
 
@@ -362,39 +245,42 @@ WHERE job_variants_id = 'variant-1';
 
 ---
 
-## 🛠️ 구현 단계별 체크리스트
+## ✅ 구현 완료 체크리스트
 
-### Phase 1: 스키마 및 트리거 변경
-- [ ] `jobs_variants` 테이블에 `status`, `current_step`, `updated_at` 컬럼 추가
-- [ ] 인덱스 추가
-- [ ] `jobs_variants` 테이블용 트리거 함수 생성
-- [ ] 트리거 생성 및 테스트
+### Phase 1: 스키마 및 트리거 변경 ✅
+- [x] `jobs_variants` 테이블에 `status`, `current_step`, `updated_at` 컬럼 추가
+- [x] 인덱스 추가
+- [x] `jobs_variants` 테이블용 트리거 함수 생성
+- [x] 트리거 생성 및 테스트
+- [x] 매 단계마다 `jobs` 테이블 업데이트 로직 구현
 
-### Phase 2: 데이터베이스 모델 변경
-- [ ] `JobVariant` 모델에 새 컬럼 추가
-- [ ] SQLAlchemy 모델 업데이트
+### Phase 2: 데이터베이스 모델 변경 ✅
+- [x] `JobVariant` 모델에 새 컬럼 추가
+- [x] SQLAlchemy 모델 업데이트
 
-### Phase 3: 리스너 변경
-- [ ] `job_variant_state_changed` 채널 리스너 추가
-- [ ] 또는 기존 리스너에 variant 이벤트 처리 추가
+### Phase 3: 리스너 변경 ✅
+- [x] `job_variant_state_changed` 채널 리스너 추가
+- [x] `_process_job_variant_state_change()` 함수 구현
 
-### Phase 4: 파이프라인 트리거 변경
-- [ ] `trigger_next_pipeline_stage` 함수에 `job_variants_id` 파라미터 추가 (필수)
-- [ ] `PIPELINE_STAGES` 로직은 유지 (단계 매핑은 동일)
-- [ ] 이미지 조회 로직 변경 (`job_inputs` → `jobs_variants.img_asset_id`)
-- [ ] **병렬 실행 구현**: 같은 `job_id`의 여러 variant를 병렬로 처리
-  - 리스너에서 `job_id`별로 그룹화하여 `asyncio.gather()`로 병렬 실행
-  - 각 variant는 독립적인 태스크로 실행
+### Phase 4: 파이프라인 트리거 변경 ✅
+- [x] `trigger_next_pipeline_stage_for_variant()` 함수 구현
+- [x] `job_variants_id` 기반 파이프라인 실행
+- [x] 이미지 조회 로직 변경 (`job_inputs` → `jobs_variants.img_asset_id`)
+- [x] 병렬 실행 지원 (각 variant는 독립적으로 실행)
 
-### Phase 5: API 엔드포인트 변경
-- [ ] 모든 API 엔드포인트에 `job_variants_id` 파라미터 추가
-- [ ] 이미지 조회 로직 변경
-- [ ] Job 상태 업데이트 로직 변경 (`jobs` → `jobs_variants`)
+### Phase 5: API 엔드포인트 변경 ✅
+- [x] 모든 8개 API 엔드포인트에 `job_variants_id` 필수 파라미터 추가
+- [x] 이미지 조회 로직 변경
+- [x] Job 상태 업데이트 로직 변경 (`jobs` → `jobs_variants`)
 
-### Phase 6: 테스트
-- [ ] 단위 테스트 업데이트
-- [ ] 통합 테스트 업데이트
-- [ ] 전체 파이프라인 테스트
+### Phase 6: Thread-safe 모델 로딩 ✅
+- [x] LLaVA 모델 로딩 시 `threading.Lock` 사용
+- [x] Double-checked locking 패턴 구현
+
+### Phase 7: 테스트 ✅
+- [x] 테스트 스크립트 작성 (`test/test_job_variants_pipeline.py`)
+- [x] Argument parser로 유동적 테스트 지원
+- [x] 테이블 상태 모니터링 기능 추가
 
 ---
 
@@ -578,13 +464,13 @@ CREATE TRIGGER update_job_status_from_variants_trigger
 
 ---
 
-#### ✅ 옵션 C: 하이브리드 (Jobs는 최종 단계만) - **최종 결정**
+#### ✅ 옵션 C: 하이브리드 (Jobs는 매 단계 업데이트) - **최종 결정 및 구현 완료**
 
 **원칙**:
 - `jobs.current_step`은 현재 진행 중인 파트의 단계를 나타냄
 - yh 파트 시작: `jobs.current_step = 'vlm_analyze'` (ye 파트에서 설정)
-- yh 파트 진행 중: `jobs.current_step`은 유지, `jobs_variants`만 업데이트
-- yh 파트 완료: 모든 variants 완료 시 `jobs.current_step = 'iou_eval'`, `jobs.status = 'done'`
+- yh 파트 진행 중: **매 단계마다** 모든 variants가 같은 단계에서 `done`이면 `jobs.current_step = 해당 단계`로 업데이트
+- yh 파트 완료: 모든 variants가 `iou_eval` 단계에서 `done`이면 `jobs.current_step = 'iou_eval'`, `jobs.status = 'done'`
 
 **구현 방법**:
 - ye 파트에서 `img_gen` 완료 시 `jobs.current_step = 'vlm_analyze'` 설정
@@ -639,32 +525,57 @@ WHERE job_variants_id = 'variant-1';
 -- jobs 테이블은 업데이트하지 않음 (ye 파트에서 설정한 값 유지)
 ```
 
-#### 3. yh 파트 완료 시
+#### 3. yh 파트 진행 중 (매 단계마다 jobs 테이블 업데이트)
 ```sql
--- 모든 variants 완료 확인 후 jobs 테이블 업데이트
--- (트리거 또는 애플리케이션 로직에서 처리)
-
--- 트리거 함수
+-- 트리거 함수: 매 단계마다 모든 variants 완료 여부 확인
 CREATE OR REPLACE FUNCTION check_all_variants_done()
 RETURNS TRIGGER AS $$
 DECLARE
     total_count INTEGER;
     done_count INTEGER;
+    current_step_done_count INTEGER;
+    all_same_step_done BOOLEAN;
+    job_status TEXT;
+    job_current_step TEXT;
 BEGIN
-    -- 해당 job_id의 모든 variants 개수 확인
-    SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'done')
-    INTO total_count, done_count
+    -- 해당 job_id의 모든 variants 개수 및 상태 확인
+    SELECT 
+        COUNT(*),
+        COUNT(*) FILTER (WHERE status = 'done'),
+        COUNT(*) FILTER (WHERE status = 'done' AND current_step = NEW.current_step)
+    INTO total_count, done_count, current_step_done_count
     FROM jobs_variants
     WHERE job_id = NEW.job_id;
     
-    -- 모든 variants가 완료되면 jobs 테이블 업데이트
-    IF total_count > 0 AND done_count = total_count THEN
-        UPDATE jobs 
-        SET status = 'done',
-            current_step = 'iou_eval',  -- yh 파트의 마지막 단계
-            updated_at = CURRENT_TIMESTAMP
-        WHERE job_id = NEW.job_id;
+    -- img_gen 단계는 제외
+    IF NEW.current_step = 'img_gen' THEN
+        RETURN NEW;
     END IF;
+    
+    -- 모든 variants가 같은 단계에서 done인지 확인
+    all_same_step_done := (current_step_done_count = total_count);
+    
+    -- 모든 variants가 같은 단계에서 done인 경우
+    IF all_same_step_done THEN
+        job_status := 'done';
+        job_current_step := NEW.current_step;  -- 현재 단계로 업데이트
+    -- 진행 중인 경우
+    ELSIF done_count > 0 OR failed_count > 0 THEN
+        job_status := 'running';
+        IF current_step_done_count > 0 THEN
+            job_current_step := NEW.current_step;
+        ELSE
+            -- 이전 단계 유지
+            SELECT current_step INTO job_current_step FROM jobs WHERE job_id = NEW.job_id;
+        END IF;
+    END IF;
+    
+    -- jobs 테이블 업데이트
+    UPDATE jobs 
+    SET status = job_status,
+        current_step = job_current_step,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE job_id = NEW.job_id;
     
     RETURN NEW;
 END;
@@ -673,9 +584,14 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER check_all_variants_done_trigger
     AFTER UPDATE ON jobs_variants
     FOR EACH ROW
-    WHEN (NEW.status = 'done')
+    WHEN (NEW.status = 'done' OR NEW.status = 'failed')
     EXECUTE FUNCTION check_all_variants_done();
 ```
+
+**동작 방식**:
+- 모든 variants가 `vlm_analyze` 단계에서 `done` → `jobs.current_step = 'vlm_analyze'`, `jobs.status = 'done'`
+- 모든 variants가 `yolo_detect` 단계에서 `done` → `jobs.current_step = 'yolo_detect'`, `jobs.status = 'done'`
+- 모든 variants가 `iou_eval` 단계에서 `done` → `jobs.current_step = 'iou_eval'`, `jobs.status = 'done'` (최종 완료)
 
 ---
 
@@ -707,42 +623,41 @@ CREATE TRIGGER check_all_variants_done_trigger
 
 ## 🚀 병렬 실행 구현 세부사항
 
-### 리스너에서 병렬 처리 로직
+### ✅ 구현 완료: Thread-safe 모델 로딩
+
+**파일**: `services/llava_service.py`
 
 ```python
-# services/job_state_listener.py
+import threading
 
-async def _process_job_variant_state_change(self, payload: dict):
-    """job_variants 상태 변경 처리 (병렬 실행 지원)"""
-    job_variants_id = payload.get('job_variants_id')
-    job_id = payload.get('job_id')
-    current_step = payload.get('current_step')
-    status = payload.get('status')
+_model_lock = threading.Lock()  # 모델 로딩 동기화를 위한 락
+
+def get_llava_model():
+    """LLaVa 모델 및 프로세서 로드 (싱글톤 패턴, thread-safe)"""
+    global _processor, _model
     
-    # 같은 job_id의 다른 variant들도 함께 처리할지 확인
-    if status == 'done' and current_step in ['img_gen', 'vlm_analyze', 'yolo_detect', ...]:
-        # 같은 job_id의 모든 queued/running variant들을 찾아서 병렬 실행
-        variants = await self._get_pending_variants(job_id)
-        
-        # 병렬 실행
-        tasks = [
-            self._trigger_variant_pipeline(variant_id)
-            for variant_id in variants
-        ]
-        
-        # asyncio.gather로 병렬 실행 (최대 3개)
-        await asyncio.gather(*tasks, return_exceptions=True)
+    # Double-checked locking 패턴으로 thread-safe하게 모델 로딩
+    if _model is None or _processor is None:
+        with _model_lock:
+            # 다시 확인 (다른 스레드가 이미 로딩했을 수 있음)
+            if _model is None or _processor is None:
+                # 모델 로딩 코드...
 ```
 
-### 성능 고려사항
+**동작 방식**:
+- 여러 variants가 동시에 모델을 요청해도 한 번만 로드됨
+- 첫 번째 요청이 모델을 로드하는 동안 다른 요청은 대기
+- 모델 로딩 완료 후 모든 요청이 같은 모델 인스턴스 사용
 
-1. **리소스 모니터링**: 
-   - CPU 사용률, 메모리 사용률, GPU 사용률 모니터링
-   - 리소스 부족 시 순차 실행으로 전환
+### 병렬 실행 동작
 
-2. **병렬 수 제한**:
-   - 초기: 3개 variant 모두 병렬 실행
-   - 리소스 부족 시: 2개씩 또는 순차 실행
+1. **각 variant는 독립적으로 실행**:
+   - 각 variant는 별도의 API 요청으로 처리
+   - FastAPI가 비동기로 여러 요청을 동시에 처리
+
+2. **모델 로딩 충돌 방지**:
+   - Thread-safe 모델 로딩으로 동시 접근 시 한 번만 로드
+   - 나머지는 로딩 완료를 대기
 
 3. **에러 처리**:
    - 하나의 variant 실패 시 다른 variant는 계속 실행
@@ -750,7 +665,76 @@ async def _process_job_variant_state_change(self, payload: dict):
 
 ---
 
+## 📝 구현 완료 파일 목록
+
+### 스키마 및 트리거
+- ✅ `db/init/01_schema.sql` - `jobs_variants` 테이블 스키마 변경
+- ✅ `db/init/03_job_variants_state_notify_trigger.sql` - 트리거 함수 및 트리거 생성
+
+### Python 코드
+- ✅ `database.py` - `JobVariant` 모델 추가/수정
+- ✅ `models.py` - 모든 Input 모델에 `job_variants_id` 필수 필드 추가
+- ✅ `services/job_state_listener.py` - variant 이벤트 처리 추가
+- ✅ `services/pipeline_trigger.py` - `job_variants_id` 기반 파이프라인 트리거 구현
+- ✅ `services/llava_service.py` - Thread-safe 모델 로딩 구현
+- ✅ `routers/llava_stage1.py` - `job_variants_id` 파라미터 추가
+- ✅ `routers/yolo.py` - `job_variants_id` 파라미터 추가
+- ✅ `routers/planner.py` - `job_variants_id` 파라미터 추가
+- ✅ `routers/overlay.py` - `job_variants_id` 파라미터 추가
+- ✅ `routers/llava_stage2.py` - `job_variants_id` 파라미터 추가
+- ✅ `routers/ocr_eval.py` - `job_variants_id` 파라미터 추가
+- ✅ `routers/readability_eval.py` - `job_variants_id` 파라미터 추가
+- ✅ `routers/iou_eval.py` - `job_variants_id` 파라미터 추가
+
+### 테스트
+- ✅ `test/test_job_variants_pipeline.py` - Job Variants 기반 파이프라인 테스트 스크립트
+
+---
+
+## 🔄 트리거 동작 시나리오 (최종)
+
+### 시나리오 1: img_gen 완료 후 (ye 파트)
+```sql
+-- ye 파트에서 jobs_variants 생성
+INSERT INTO jobs_variants (job_variants_id, job_id, img_asset_id, creation_order, status, current_step)
+VALUES 
+    (gen_random_uuid(), 'job-123', 'img-1', 1, 'done', 'img_gen'),
+    (gen_random_uuid(), 'job-123', 'img-2', 2, 'done', 'img_gen'),
+    (gen_random_uuid(), 'job-123', 'img-3', 3, 'done', 'img_gen');
+```
+
+**결과**: 
+- `img_gen` 단계는 제외되므로 `jobs` 테이블 업데이트 안 함
+- 3개의 NOTIFY 이벤트가 발행되어, 각 variant마다 파이프라인이 시작됨
+
+### 시나리오 2: 각 단계 완료 후
+```sql
+-- variant-1의 vlm_analyze 완료
+UPDATE jobs_variants 
+SET status = 'done', 
+    current_step = 'vlm_analyze',
+    updated_at = CURRENT_TIMESTAMP
+WHERE job_variants_id = 'variant-1';
+```
+
+**결과**: 
+- variant-1에 대해 yolo_detect가 자동 실행됨
+- 모든 variants가 `vlm_analyze`에서 `done`이면 `jobs.current_step = 'vlm_analyze'`로 업데이트
+
+### 시나리오 3: 모든 variants가 같은 단계에서 완료
+```sql
+-- 모든 variants가 yolo_detect 단계에서 done
+-- (각 variant가 독립적으로 업데이트됨)
+```
+
+**결과**: 
+- 트리거가 모든 variants가 `yolo_detect`에서 `done`인 것을 감지
+- `jobs.current_step = 'yolo_detect'`, `jobs.status = 'done'`으로 업데이트
+
+---
+
 **작성일**: 2025-11-28  
+**최종 업데이트**: 2025-11-28  
 **작성자**: LEEYH205  
-**버전**: 1.1.0 (옵션 C 결정, 병렬 실행 추가)
+**버전**: 2.0.0 (구현 완료, 매 단계 jobs 테이블 업데이트, thread-safe 모델 로딩)
 
