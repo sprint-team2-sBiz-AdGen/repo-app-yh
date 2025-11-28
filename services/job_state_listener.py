@@ -29,6 +29,7 @@ class JobStateListener:
         self.conn: Optional[asyncpg.Connection] = None
         self.running = False
         self.reconnect_delay = JOB_STATE_LISTENER_RECONNECT_DELAY
+        self.pending_tasks: set = set()  # 실행 중인 태스크 추적
     
     async def start(self):
         """리스너 시작"""
@@ -36,8 +37,26 @@ class JobStateListener:
         await self._listen_loop()
     
     async def stop(self):
-        """리스너 중지"""
+        """리스너 중지 (실행 중인 태스크 완료 대기)"""
         self.running = False
+        
+        # 실행 중인 태스크 완료 대기
+        if self.pending_tasks:
+            logger.info(f"실행 중인 {len(self.pending_tasks)}개 태스크 완료 대기 중...")
+            # 최대 30초 대기
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self.pending_tasks, return_exceptions=True),
+                    timeout=30.0
+                )
+                logger.info("모든 태스크 완료됨")
+            except asyncio.TimeoutError:
+                logger.warning("일부 태스크가 30초 내에 완료되지 않아 강제 종료합니다")
+                # 타임아웃된 태스크 취소
+                for task in self.pending_tasks:
+                    if not task.done():
+                        task.cancel()
+        
         if self.conn:
             await self.conn.close()
             self.conn = None
@@ -108,9 +127,13 @@ class JobStateListener:
             )
             
             # 비동기로 처리 (이벤트 핸들러는 동기 함수이므로)
-            asyncio.create_task(
+            # 태스크를 추적하여 종료 시 완료 대기
+            task = asyncio.create_task(
                 self._process_job_state_change(job_id, current_step, status, tenant_id)
             )
+            self.pending_tasks.add(task)
+            # 태스크 완료 시 자동으로 제거
+            task.add_done_callback(self.pending_tasks.discard)
             
         except Exception as e:
             logger.error(f"이벤트 처리 오류: {e}", exc_info=True)

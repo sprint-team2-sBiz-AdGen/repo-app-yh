@@ -78,6 +78,17 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                 detail=f"Job tenant_id mismatch"
             )
         
+        # Step 0.5: IoU 평가 시작 - job 상태 업데이트 (current_step='iou_eval', status='running')
+        try:
+            job.current_step = 'iou_eval'
+            job.status = 'running'
+            db.commit()
+            logger.info(f"Job 상태 업데이트: job_id={job_id}, current_step='iou_eval', status='running'")
+        except Exception as e:
+            logger.error(f"Job 상태 업데이트 실패: {e}")
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Job 상태 업데이트 중 오류가 발생했습니다: {str(e)}")
+        
         # Step 1: overlay_id 검증 및 텍스트 영역 좌표 조회
         try:
             overlay_id_uuid = uuid.UUID(body.overlay_id)
@@ -300,7 +311,18 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                 detail=f"IoU 평가 결과 저장 중 오류가 발생했습니다: {str(e)}"
             )
         
-        # Step 7: 응답 반환
+        # Step 7: Job 상태를 'done'으로 업데이트
+        try:
+            job.status = 'done'
+            db.commit()
+            logger.info(f"Job 상태 업데이트: job_id={job_id}, status='done'")
+        except Exception as e:
+            logger.error(f"Job 상태 업데이트 실패: {e}")
+            db.rollback()
+            # 상태 업데이트 실패해도 결과는 반환
+            logger.warning(f"Job 상태 업데이트 실패했지만 결과는 반환합니다: {e}")
+        
+        # Step 8: 응답 반환
         return IoUEvalOut(
             job_id=body.job_id,
             evaluation_id=str(evaluation_id),
@@ -311,8 +333,28 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
         )
         
     except HTTPException:
+        # HTTPException 발생 시 job 상태를 failed로 업데이트
+        try:
+            job = db.query(Job).filter(Job.job_id == job_id).first()
+            if job:
+                job.status = 'failed'
+                db.commit()
+                logger.info(f"Job 상태 업데이트: job_id={job_id}, status='failed' (오류 발생)")
+        except Exception as e:
+            logger.error(f"Job 상태 업데이트 실패 (오류 처리 중): {e}")
+            db.rollback()
         raise
     except Exception as e:
+        # 기타 예외 발생 시 job 상태를 failed로 업데이트
+        try:
+            job = db.query(Job).filter(Job.job_id == job_id).first()
+            if job:
+                job.status = 'failed'
+                db.commit()
+                logger.info(f"Job 상태 업데이트: job_id={job_id}, status='failed' (예외 발생)")
+        except Exception as update_error:
+            logger.error(f"Job 상태 업데이트 실패 (예외 처리 중): {update_error}")
+            db.rollback()
         logger.error(f"IoU 평가 API 오류: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}")
 
