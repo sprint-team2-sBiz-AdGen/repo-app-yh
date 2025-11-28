@@ -25,6 +25,8 @@ dependencies = [
     # GPT API 관련
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",
+    # PostgreSQL async driver for LISTEN/NOTIFY
+    "asyncpg>=0.29.0",
 ]
 
 [build-system]

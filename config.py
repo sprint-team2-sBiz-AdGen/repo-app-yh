@@ -15,7 +15,7 @@
 #       - PART_ASSETS_DIR
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-20
+# updated_at: 2025-11-28
 # author: LEEYH205
 # description: Configuration logic
 # version: 0.1.0
@@ -104,4 +104,8 @@ else:
 GPT_API_KEY = os.getenv("OPENAPI_KEY") or os.getenv("GPT_API_KEY", "")  # OpenAI API 키
 GPT_MODEL_NAME = os.getenv("GPT_MODEL_NAME", "gpt-4o-mini")  # 사용할 GPT 모델
 GPT_MAX_TOKENS = int(os.getenv("GPT_MAX_TOKENS", "1000"))  # 최대 토큰 수
+
+# Job State Listener 설정
+ENABLE_JOB_STATE_LISTENER = os.getenv("ENABLE_JOB_STATE_LISTENER", "true").lower() in ("true", "1", "yes", "on")
+JOB_STATE_LISTENER_RECONNECT_DELAY = int(os.getenv("JOB_STATE_LISTENER_RECONNECT_DELAY", "5"))
 
