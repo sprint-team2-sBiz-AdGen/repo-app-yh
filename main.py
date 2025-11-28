@@ -8,7 +8,7 @@
 #       - Metrics endpoint
 ########################################################
 # created_at: 2025-11-13
-# updated_at: 2025-11-24
+# updated_at: 2025-11-28
 # author: LEEYH205
 # description: Main application logic
 # version: 0.1.0
@@ -22,8 +22,9 @@
 import os
 import subprocess
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from config import PART_NAME, HOST, PORT
+from config import PART_NAME, HOST, PORT, ENABLE_JOB_STATE_LISTENER
 from middleware import metrics_middleware, metrics_endpoint
 from routers import (
     yolo, planner, overlay, evals, llava_stage1, llava_stage2, health,
@@ -65,9 +66,48 @@ if ROOT_PATH is None and PART_NAME == "yh":
     # nginx 뒤에서 실행할 때는 ROOT_PATH=/api/yh 환경 변수 설정
     ROOT_PATH = None
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """애플리케이션 생명주기 관리"""
+    # Startup
+    print("=" * 60)
+    print("애플리케이션 시작 중...")
+    logger.info("애플리케이션 시작 중...")
+    
+    if ENABLE_JOB_STATE_LISTENER:
+        print(f"ENABLE_JOB_STATE_LISTENER: {ENABLE_JOB_STATE_LISTENER}")
+        try:
+            from services.job_state_listener import start_listener
+            print("Job State Listener 시작...")
+            logger.info("Job State Listener 시작...")
+            await start_listener()
+            print("✓ Job State Listener 시작 완료")
+        except Exception as e:
+            print(f"❌ Job State Listener 시작 실패: {e}")
+            logger.error(f"Job State Listener 시작 실패: {e}", exc_info=True)
+    else:
+        print("Job State Listener 비활성화됨")
+    
+    yield
+    
+    # Shutdown
+    print("애플리케이션 종료 중...")
+    logger.info("애플리케이션 종료 중...")
+    
+    if ENABLE_JOB_STATE_LISTENER:
+        try:
+            from services.job_state_listener import stop_listener
+            print("Job State Listener 종료...")
+            logger.info("Job State Listener 종료...")
+            await stop_listener()
+        except Exception as e:
+            print(f"❌ Job State Listener 종료 실패: {e}")
+            logger.error(f"Job State Listener 종료 실패: {e}", exc_info=True)
+
 app = FastAPI(
     title=f"app-{PART_NAME} (Planner/Overlay/Eval)",
-    root_path=ROOT_PATH
+    root_path=ROOT_PATH,
+    lifespan=lifespan
 )
 
 # 미들웨어 등록
