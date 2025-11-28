@@ -9,10 +9,10 @@
 # - YOLO 감지 결과 활용
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-21
+# updated_at: 2025-11-28
 # author: LEEYH205
 # description: Planner logic
-# version: 0.2.0
+# version: 1.1.0
 # status: development
 # tags: planner
 # dependencies: fastapi, pydantic, PIL, requests
@@ -28,7 +28,7 @@ import uuid
 from models import PlannerIn, PlannerOut, ProposalOut
 from utils import abs_from_url
 from services.planner_service import propose_overlay_positions
-from database import get_db, Job, JobInput, ImageAsset, Detection, YOLORun, PlannerProposal
+from database import get_db, Job, JobInput, ImageAsset, Detection, YOLORun, PlannerProposal, JobVariant
 import logging
 
 logger = logging.getLogger(__name__)
@@ -69,21 +69,40 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
     - `avoid`: 금지 영역 [x, y, width, height] (정규화된 좌표)
     """
     try:
-        # Step 0: job_id 검증
+        # Step 0: job_variants_id 및 job_id 검증
         try:
+            job_variants_id = uuid.UUID(body.job_variants_id)
             job_id = uuid.UUID(body.job_id)
-        except ValueError:
+        except ValueError as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid job_id format: {body.job_id}"
+                detail=f"Invalid UUID format: {str(e)}"
             )
         
+        # job_variants 조회
+        job_variant = db.query(JobVariant).filter(JobVariant.job_variants_id == job_variants_id).first()
+        if not job_variant:
+            logger.error(f"Job variant not found: job_variants_id={body.job_variants_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Job variant not found: {body.job_variants_id}"
+            )
+        
+        # job 조회 및 검증
         job = db.query(Job).filter(Job.job_id == job_id).first()
         if not job:
             logger.error(f"Job not found: job_id={body.job_id}")
             raise HTTPException(
                 status_code=404,
                 detail=f"Job not found: {body.job_id}"
+            )
+        
+        # job_variant와 job의 job_id 일치 확인
+        if job_variant.job_id != job_id:
+            logger.error(f"Job variant job_id mismatch: job_variant.job_id={job_variant.job_id}, request.job_id={job_id}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Job variant job_id mismatch"
             )
         
         if job.tenant_id != body.tenant_id:
@@ -93,42 +112,37 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                 detail=f"Job tenant_id mismatch"
             )
         
-        # Step 0.5: job 상태 확인 (current_step='yolo_detect', status='done'이어야 함)
-        if job.current_step != 'yolo_detect' or job.status != 'done':
-            logger.error(f"Job 상태가 planner 실행 조건을 만족하지 않음: current_step={job.current_step}, status={job.status}")
+        # Step 0.5: job_variant 상태 확인 (current_step='yolo_detect', status='done'이어야 함)
+        if job_variant.current_step != 'yolo_detect' or job_variant.status != 'done':
+            logger.error(f"Job variant 상태가 planner 실행 조건을 만족하지 않음: current_step={job_variant.current_step}, status={job_variant.status}")
             raise HTTPException(
                 status_code=400,
-                detail=f"Job 상태가 planner 실행 조건을 만족하지 않습니다. current_step='yolo_detect', status='done'이어야 합니다. (현재: current_step='{job.current_step}', status='{job.status}')"
+                detail=f"Job variant 상태가 planner 실행 조건을 만족하지 않습니다. current_step='yolo_detect', status='done'이어야 합니다. (현재: current_step='{job_variant.current_step}', status='{job_variant.status}')"
             )
         
-        # Step 0.6: Planner 시작 - job 상태 업데이트 (current_step='planner', status='running')
-        try:
-            job.current_step = 'planner'
-            job.status = 'running'
-            db.commit()
-            logger.info(f"Job 상태 업데이트: job_id={job_id}, current_step='planner', status='running'")
-        except Exception as e:
-            logger.error(f"Job 상태 업데이트 실패: {e}")
-            db.rollback()
-            raise HTTPException(status_code=500, detail=f"Job 상태 업데이트 중 오류가 발생했습니다: {str(e)}")
+        # Step 0.6: Planner 시작 - job_variants 상태 업데이트 (current_step='planner', status='running')
+        db.execute(
+            text("""
+                UPDATE jobs_variants 
+                SET status = 'running', 
+                    current_step = 'planner',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_variants_id = :job_variants_id
+            """),
+            {"job_variants_id": job_variants_id}
+        )
+        db.flush()
+        logger.info(f"Updated job_variant: {job_variants_id} - status=running, current_step=planner")
         
-        # Step 1: job_inputs에서 이미지 정보 가져오기
+        # Step 1: jobs_variants에서 이미지 정보 가져오기
         asset_url = body.asset_url
         if not asset_url:
-            job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
-            if not job_input:
-                logger.error(f"Job input not found: job_id={job_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Job input not found for job_id: {job_id}"
-                )
-            
-            image_asset_id = job_input.img_asset_id
+            image_asset_id = job_variant.img_asset_id
             if not image_asset_id:
-                logger.error(f"Image asset ID not found in job_input: job_id={job_id}")
+                logger.error(f"Image asset ID not found in job_variant: job_variants_id={job_variants_id}")
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Image asset ID not found in job input"
+                    detail=f"Image asset ID not found in job variant"
                 )
             
             image_asset = db.query(ImageAsset).filter(ImageAsset.image_asset_id == image_asset_id).first()
@@ -140,7 +154,7 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                 )
             
             asset_url = image_asset.image_url
-            logger.info(f"Found image asset from job_input: {image_asset_id}, URL: {asset_url}")
+            logger.info(f"Found image asset from job_variant: {image_asset_id}, URL: {asset_url}")
         
         # Step 2: 이미지 로드
         try:
@@ -271,16 +285,25 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
             # DB 저장 실패해도 결과는 반환
             logger.warning(f"Planner proposal DB save failed but continuing: {e}")
         
-        # Step 6: Planner 완료 - job 상태 업데이트 (status='done')
+        # Step 6: Planner 완료 - job_variants 상태 업데이트 (status='done')
         try:
-            job.status = 'done'
+            db.execute(
+                text("""
+                    UPDATE jobs_variants 
+                    SET status = 'done', 
+                        current_step = 'planner',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_variants_id = :job_variants_id
+                """),
+                {"job_variants_id": job_variants_id}
+            )
             db.commit()
-            logger.info(f"Job 상태 업데이트: job_id={job_id}, status='done'")
+            logger.info(f"Job variant 상태 업데이트: job_variants_id={job_variants_id}, status='done'")
         except Exception as e:
-            logger.error(f"Job 상태 업데이트 실패: {e}")
+            logger.error(f"Job variant 상태 업데이트 실패: {e}")
             db.rollback()
             # 상태 업데이트 실패해도 결과는 반환
-            logger.warning(f"Job 상태 업데이트 실패했지만 결과는 반환합니다: {e}")
+            logger.warning(f"Job variant 상태 업데이트 실패했지만 결과는 반환합니다: {e}")
         
         return PlannerOut(
             proposals=proposals,
@@ -288,21 +311,39 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
         )
         
     except HTTPException:
-        # HTTPException 발생 시 job 상태를 failed로 업데이트
+        # HTTPException 발생 시 job_variants 상태를 failed로 업데이트
         try:
-            job = db.query(Job).filter(Job.job_id == job_id).first()
-            if job:
-                job.status = 'failed'
+            if 'job_variants_id' in locals():
+                db.execute(
+                    text("""
+                        UPDATE jobs_variants 
+                        SET status = 'failed', 
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = :job_variants_id
+                    """),
+                    {"job_variants_id": job_variants_id}
+                )
                 db.commit()
-                logger.info(f"Job 상태 업데이트: job_id={job_id}, status='failed' (오류 발생)")
+                logger.info(f"Job variant 상태 업데이트: job_variants_id={job_variants_id}, status='failed' (오류 발생)")
         except Exception as e:
-            logger.error(f"Job 상태 업데이트 실패 (오류 처리 중): {e}")
+            logger.error(f"Job variant 상태 업데이트 실패 (오류 처리 중): {e}")
             db.rollback()
         raise
     except Exception as e:
-        # 기타 예외 발생 시 job 상태를 failed로 업데이트
+        # 기타 예외 발생 시 job_variants 상태를 failed로 업데이트
         try:
-            job = db.query(Job).filter(Job.job_id == job_id).first()
+            if 'job_variants_id' in locals():
+                db.execute(
+                    text("""
+                        UPDATE jobs_variants 
+                        SET status = 'failed', 
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = :job_variants_id
+                    """),
+                    {"job_variants_id": job_variants_id}
+                )
+                db.commit()
+                logger.info(f"Job variant 상태 업데이트: job_variants_id={job_variants_id}, status='failed' (예외 발생)")
             if job:
                 job.status = 'failed'
                 db.commit()

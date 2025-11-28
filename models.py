@@ -1,18 +1,11 @@
 
 """Pydantic 모델 정의"""
 ########################################################
-# TODO: Implement the actual Pydantic models
-#       - DetectIn
-#       - PlannerIn
-#       - OverlayIn
-#       - EvalIn
-#       - JudgeIn
-########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-24    
+# updated_at: 2025-11-28   
 # author: LEEYH205
 # description: Pydantic models
-# version: 0.1.0
+# version: 1.1.0
 # status: development
 # tags: pydantic
 # dependencies: fastapi, pydantic, PIL, requests
@@ -26,9 +19,10 @@ from typing import Optional, List, Dict, Any
 
 class DetectIn(BaseModel):
     """YOLO 감지 요청 모델"""
-    job_id: str  # 기존 job의 ID (업데이트할 job)
+    job_variants_id: str  # 필수: Job Variant ID
+    job_id: str  # 기존 job의 ID (업데이트할 job, 호환성 유지)
     tenant_id: str
-    asset_url: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
+    asset_url: Optional[str] = None  # Optional: jobs_variants.img_asset_id에서 가져올 수 있으면 생략 가능
     model: Optional[str] = "forbidden"
 
 
@@ -50,9 +44,10 @@ class DetectOut(BaseModel):
 
 class PlannerIn(BaseModel):
     """Planner 요청 모델"""
-    job_id: str  # 기존 job의 ID (DB에서 detections를 가져올 job)
+    job_variants_id: str  # 필수: Job Variant ID
+    job_id: str  # 기존 job의 ID (DB에서 detections를 가져올 job, 호환성 유지)
     tenant_id: str
-    asset_url: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
+    asset_url: Optional[str] = None  # Optional: jobs_variants.img_asset_id에서 가져올 수 있으면 생략 가능
     detections: Optional[dict] = None  # Optional: DB에서 가져올 수 있으면 생략 가능 (하위 호환성 유지)
     min_overlay_width: Optional[float] = 0.5  # 최소 오버레이 너비 비율 (0-1)
     min_overlay_height: Optional[float] = 0.12  # 최소 오버레이 높이 비율 (0-1)
@@ -102,9 +97,10 @@ class PlannerOut(BaseModel):
 
 class OverlayIn(BaseModel):
     """Overlay 요청 모델"""
-    job_id: str  # 기존 job의 ID (업데이트할 job)
+    job_variants_id: str  # 필수: Job Variant ID
+    job_id: str  # 기존 job의 ID (업데이트할 job, 호환성 유지)
     tenant_id: str
-    variant_asset_url: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
+    variant_asset_url: Optional[str] = None  # Optional: jobs_variants.img_asset_id에서 가져올 수 있으면 생략 가능
     proposal_id: Optional[str] = None
     text: str
     x_align: str = "center"
@@ -131,7 +127,8 @@ class EvalIn(BaseModel):
 
 class JudgeIn(BaseModel):
     """Judge 요청 모델"""
-    job_id: str  # 기존 job의 ID (업데이트할 job)
+    job_variants_id: str  # 필수: Job Variant ID
+    job_id: str  # 기존 job의 ID (업데이트할 job, 호환성 유지)
     tenant_id: str
     overlay_id: Optional[str] = None  # Optional: overlay_layouts에서 render_asset_url을 가져올 수 있으면 생략 가능
     render_asset_url: Optional[str] = None  # Optional: overlay_id가 있으면 생략 가능
@@ -139,9 +136,10 @@ class JudgeIn(BaseModel):
 
 class LLaVaStage1In(BaseModel):
     """LLaVa Stage 1 Validation 요청 모델"""
-    job_id: str  # 기존 job의 ID (업데이트할 job)
+    job_variants_id: str  # 필수: Job Variant ID
+    job_id: str  # 기존 job의 ID (업데이트할 job, 호환성 유지)
     tenant_id: str
-    asset_url: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
+    asset_url: Optional[str] = None  # Optional: jobs_variants.img_asset_id에서 가져올 수 있으면 생략 가능
     ad_copy_text: Optional[str] = None  # Optional: job_inputs에서 가져올 수 있으면 생략 가능
     prompt: Optional[str] = None
 
@@ -198,7 +196,8 @@ class JudgeOut(BaseModel):
 
 class OCREvalIn(BaseModel):
     """OCR 평가 요청 모델"""
-    job_id: str  # 기존 job의 ID
+    job_variants_id: str  # 필수: Job Variant ID
+    job_id: str  # 기존 job의 ID (호환성 유지)
     tenant_id: str
     overlay_id: str  # overlay_layouts에서 텍스트와 이미지 URL 조회
 
@@ -217,7 +216,8 @@ class OCREvalOut(BaseModel):
 
 class ReadabilityEvalIn(BaseModel):
     """가독성 평가 요청 모델"""
-    job_id: str  # 기존 job의 ID
+    job_variants_id: str  # 필수: Job Variant ID
+    job_id: str  # 기존 job의 ID (호환성 유지)
     tenant_id: str
     overlay_id: str  # overlay_layouts에서 색상 정보 조회
 
@@ -235,7 +235,8 @@ class ReadabilityEvalOut(BaseModel):
 
 class IoUEvalIn(BaseModel):
     """IoU 평가 요청 모델"""
-    job_id: str  # 기존 job의 ID
+    job_variants_id: str  # 필수: Job Variant ID
+    job_id: str  # 기존 job의 ID (호환성 유지)
     tenant_id: str
     overlay_id: str  # overlay_layouts에서 텍스트 영역 좌표 조회
 

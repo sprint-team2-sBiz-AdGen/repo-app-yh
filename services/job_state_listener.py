@@ -3,9 +3,10 @@ PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
 """
 ########################################################
 # created_at: 2025-11-28
+# updated_at: 2025-11-28
 # author: LEEYH205
 # description: PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
-# version: 1.0.0
+# version: 1.1.0
 # status: development
 # tags: database, listener, notify
 # dependencies: asyncpg, fastapi
@@ -86,9 +87,11 @@ class JobStateListener:
             self.conn = await asyncpg.connect(asyncpg_url)
             logger.info("PostgreSQL 연결 성공 (Job State Listener)")
             
-            # LISTEN 시작
+            # LISTEN 시작 (jobs 테이블과 jobs_variants 테이블 모두)
             await self.conn.add_listener('job_state_changed', self._handle_notification)
+            await self.conn.add_listener('job_variant_state_changed', self._handle_variant_notification)
             logger.info("LISTEN 'job_state_changed' 시작")
+            logger.info("LISTEN 'job_variant_state_changed' 시작")
             
             # 연결이 끊길 때까지 대기
             while self.running:
@@ -103,6 +106,7 @@ class JobStateListener:
             if self.conn:
                 try:
                     await self.conn.remove_listener('job_state_changed', self._handle_notification)
+                    await self.conn.remove_listener('job_variant_state_changed', self._handle_variant_notification)
                     await self.conn.close()
                     logger.info("PostgreSQL 연결 종료 (Job State Listener)")
                 except Exception as e:
@@ -138,6 +142,43 @@ class JobStateListener:
         except Exception as e:
             logger.error(f"이벤트 처리 오류: {e}", exc_info=True)
     
+    def _handle_variant_notification(self, conn, pid, channel, payload):
+        """NOTIFY 이벤트 핸들러 (job_variant_state_changed)"""
+        try:
+            # JSON 파싱
+            data = json.loads(payload)
+            job_variants_id = data.get('job_variants_id')
+            job_id = data.get('job_id')
+            current_step = data.get('current_step')
+            status = data.get('status')
+            tenant_id = data.get('tenant_id')
+            img_asset_id = data.get('img_asset_id')
+            
+            print(f"[LISTENER] Job Variant 상태 변화 감지: job_variants_id={job_variants_id}, job_id={job_id}, current_step={current_step}, status={status}")
+            logger.info(
+                f"Job Variant 상태 변화 감지: job_variants_id={job_variants_id}, job_id={job_id}, "
+                f"current_step={current_step}, status={status}, tenant_id={tenant_id}, img_asset_id={img_asset_id}"
+            )
+            
+            # 비동기로 처리 (이벤트 핸들러는 동기 함수이므로)
+            # 태스크를 추적하여 종료 시 완료 대기
+            task = asyncio.create_task(
+                self._process_job_variant_state_change(
+                    job_variants_id=job_variants_id,
+                    job_id=job_id,
+                    current_step=current_step,
+                    status=status,
+                    tenant_id=tenant_id,
+                    img_asset_id=img_asset_id
+                )
+            )
+            self.pending_tasks.add(task)
+            # 태스크 완료 시 자동으로 제거
+            task.add_done_callback(self.pending_tasks.discard)
+            
+        except Exception as e:
+            logger.error(f"이벤트 처리 오류 (variant): {e}", exc_info=True)
+    
     async def _process_job_state_change(
         self, 
         job_id: str, 
@@ -145,7 +186,7 @@ class JobStateListener:
         status: str,
         tenant_id: str
     ):
-        """Job 상태 변화 처리 및 다음 단계 트리거"""
+        """Job 상태 변화 처리 및 다음 단계 트리거 (기존 jobs 테이블용)"""
         try:
             from services.pipeline_trigger import trigger_next_pipeline_stage
             
@@ -158,6 +199,33 @@ class JobStateListener:
         except Exception as e:
             logger.error(
                 f"파이프라인 트리거 오류: job_id={job_id}, error={e}",
+                exc_info=True
+            )
+    
+    async def _process_job_variant_state_change(
+        self,
+        job_variants_id: str,
+        job_id: str,
+        current_step: Optional[str],
+        status: str,
+        tenant_id: str,
+        img_asset_id: str
+    ):
+        """Job Variant 상태 변화 처리 및 다음 단계 트리거"""
+        try:
+            from services.pipeline_trigger import trigger_next_pipeline_stage_for_variant
+            
+            await trigger_next_pipeline_stage_for_variant(
+                job_variants_id=job_variants_id,
+                job_id=job_id,
+                current_step=current_step,
+                status=status,
+                tenant_id=tenant_id,
+                img_asset_id=img_asset_id
+            )
+        except Exception as e:
+            logger.error(
+                f"파이프라인 트리거 오류 (variant): job_variants_id={job_variants_id}, job_id={job_id}, error={e}",
                 exc_info=True
             )
 

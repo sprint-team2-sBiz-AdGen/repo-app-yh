@@ -6,10 +6,10 @@
 # - evaluations 테이블에 결과 저장
 ########################################################
 # created_at: 2025-11-26
-# updated_at: 2025-11-26
+# updated_at: 2025-11-28
 # author: LEEYH205
 # description: IoU evaluation API
-# version: 1.0.0
+# version: 1.1.0
 # status: production
 # tags: iou, evaluation
 # dependencies: fastapi, pydantic, sqlalchemy
@@ -25,7 +25,7 @@ import json
 import time
 from models import IoUEvalIn, IoUEvalOut
 from services.iou_eval_service import calculate_iou_with_food
-from database import get_db, Job, OverlayLayout, Detection, ImageAsset
+from database import get_db, Job, OverlayLayout, Detection, ImageAsset, JobVariant
 import logging
 
 logger = logging.getLogger(__name__)
@@ -54,21 +54,40 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
             - overlap_detected: bool
     """
     try:
-        # Step 0: job_id 검증
+        # Step 0: job_variants_id 및 job_id 검증
         try:
+            job_variants_id = uuid.UUID(body.job_variants_id)
             job_id = uuid.UUID(body.job_id)
-        except ValueError:
+        except ValueError as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid job_id format: {body.job_id}"
+                detail=f"Invalid UUID format: {str(e)}"
             )
         
+        # job_variants 조회
+        job_variant = db.query(JobVariant).filter(JobVariant.job_variants_id == job_variants_id).first()
+        if not job_variant:
+            logger.error(f"Job variant not found: job_variants_id={body.job_variants_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Job variant not found: {body.job_variants_id}"
+            )
+        
+        # job 조회 및 검증
         job = db.query(Job).filter(Job.job_id == job_id).first()
         if not job:
             logger.error(f"Job not found: job_id={body.job_id}")
             raise HTTPException(
                 status_code=404,
                 detail=f"Job not found: {body.job_id}"
+            )
+        
+        # job_variant와 job의 job_id 일치 확인
+        if job_variant.job_id != job_id:
+            logger.error(f"Job variant job_id mismatch: job_variant.job_id={job_variant.job_id}, request.job_id={job_id}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Job variant job_id mismatch"
             )
         
         if job.tenant_id != body.tenant_id:
@@ -78,16 +97,19 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                 detail=f"Job tenant_id mismatch"
             )
         
-        # Step 0.5: IoU 평가 시작 - job 상태 업데이트 (current_step='iou_eval', status='running')
-        try:
-            job.current_step = 'iou_eval'
-            job.status = 'running'
-            db.commit()
-            logger.info(f"Job 상태 업데이트: job_id={job_id}, current_step='iou_eval', status='running'")
-        except Exception as e:
-            logger.error(f"Job 상태 업데이트 실패: {e}")
-            db.rollback()
-            raise HTTPException(status_code=500, detail=f"Job 상태 업데이트 중 오류가 발생했습니다: {str(e)}")
+        # Step 0.5: IoU 평가 시작 - job_variants 상태 업데이트 (current_step='iou_eval', status='running')
+        db.execute(
+            text("""
+                UPDATE jobs_variants 
+                SET status = 'running', 
+                    current_step = 'iou_eval',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_variants_id = :job_variants_id
+            """),
+            {"job_variants_id": job_variants_id}
+        )
+        db.flush()
+        logger.info(f"Updated job_variant: {job_variants_id} - status=running, current_step=iou_eval")
         
         # Step 1: overlay_id 검증 및 텍스트 영역 좌표 조회
         try:
@@ -313,9 +335,18 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
         
         # Step 7: Job 상태를 'done'으로 업데이트
         try:
-            job.status = 'done'
+            db.execute(
+                text("""
+                    UPDATE jobs_variants 
+                    SET status = 'done', 
+                        current_step = 'iou_eval',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_variants_id = :job_variants_id
+                """),
+                {"job_variants_id": job_variants_id}
+            )
             db.commit()
-            logger.info(f"Job 상태 업데이트: job_id={job_id}, status='done'")
+            logger.info(f"Job variant 상태 업데이트: job_variants_id={job_variants_id}, status='done'")
         except Exception as e:
             logger.error(f"Job 상태 업데이트 실패: {e}")
             db.rollback()
@@ -337,9 +368,17 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
         try:
             job = db.query(Job).filter(Job.job_id == job_id).first()
             if job:
-                job.status = 'failed'
+                db.execute(
+                    text("""
+                        UPDATE jobs_variants 
+                        SET status = 'failed', 
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = :job_variants_id
+                    """),
+                    {"job_variants_id": job_variants_id}
+                )
                 db.commit()
-                logger.info(f"Job 상태 업데이트: job_id={job_id}, status='failed' (오류 발생)")
+                logger.info(f"Job variant 상태 업데이트: job_variants_id={job_variants_id}, status='failed' (오류 발생)")
         except Exception as e:
             logger.error(f"Job 상태 업데이트 실패 (오류 처리 중): {e}")
             db.rollback()
@@ -349,9 +388,17 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
         try:
             job = db.query(Job).filter(Job.job_id == job_id).first()
             if job:
-                job.status = 'failed'
+                db.execute(
+                    text("""
+                        UPDATE jobs_variants 
+                        SET status = 'failed', 
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = :job_variants_id
+                    """),
+                    {"job_variants_id": job_variants_id}
+                )
                 db.commit()
-                logger.info(f"Job 상태 업데이트: job_id={job_id}, status='failed' (예외 발생)")
+                logger.info(f"Job variant 상태 업데이트: job_variants_id={job_variants_id}, status='failed' (예외 발생)")
         except Exception as update_error:
             logger.error(f"Job 상태 업데이트 실패 (예외 처리 중): {update_error}")
             db.rollback()
