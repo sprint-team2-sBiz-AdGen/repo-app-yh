@@ -554,11 +554,11 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             db.execute(
                 text("""
                     INSERT INTO overlay_layouts (
-                        overlay_id, proposal_id, layout, x_ratio, y_ratio,
+                        overlay_id, proposal_id, job_variants_id, layout, x_ratio, y_ratio,
                         width_ratio, height_ratio, text_margin, latency_ms,
                         created_at, updated_at
                     ) VALUES (
-                        :overlay_id, :proposal_id, CAST(:layout AS jsonb), :x_ratio, :y_ratio,
+                        :overlay_id, :proposal_id, :job_variants_id, CAST(:layout AS jsonb), :x_ratio, :y_ratio,
                         :width_ratio, :height_ratio, :text_margin, :latency_ms,
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
@@ -566,6 +566,7 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                 {
                     "overlay_id": overlay_id_uuid,
                     "proposal_id": proposal_id_uuid,
+                    "job_variants_id": job_variants_id,
                     "layout": json.dumps(layout_data),
                     "x_ratio": x_ratio if x_ratio is not None else 0.1,
                     "y_ratio": y_ratio if y_ratio is not None else 0.05,

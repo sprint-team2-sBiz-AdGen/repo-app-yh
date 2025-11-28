@@ -430,15 +430,14 @@ async def _get_overlay_id_from_job_variant(job_variants_id: str, job_id: str, te
     try:
         conn = await asyncpg.connect(asyncpg_url)
         try:
-            # job_variants → img_asset_id → planner_proposals → overlay_layouts 조회
+            # job_variants_id로 직접 조회 (job_variants_id 컬럼 추가 후)
             row = await conn.fetchrow(
                 """
                 SELECT ol.overlay_id
-                FROM jobs_variants jv
+                FROM overlay_layouts ol
+                INNER JOIN jobs_variants jv ON ol.job_variants_id = jv.job_variants_id
                 INNER JOIN jobs j ON jv.job_id = j.job_id
-                INNER JOIN planner_proposals pp ON jv.img_asset_id = pp.image_asset_id
-                INNER JOIN overlay_layouts ol ON pp.proposal_id = ol.proposal_id
-                WHERE jv.job_variants_id = $1
+                WHERE ol.job_variants_id = $1
                   AND j.job_id = $2
                   AND j.tenant_id = $3
                 ORDER BY ol.created_at DESC

@@ -34,6 +34,9 @@
 4. **파이프라인 트리거**: `job_variants_id` 기반 파이프라인 트리거 구현
 5. **리스너**: `job_variant_state_changed` 채널 리스너 추가
 6. **Thread-safe 모델 로딩**: LLaVA 모델 로딩 시 동시 접근 방지 (threading.Lock 사용)
+7. **멈춘 variant 재시도 로직**: 5분 이상 업데이트되지 않은 variant 자동 감지 및 재시도
+8. **iou_eval 특별 처리**: 일부 variant가 완료되지 않아도 2개 이상 완료 시 job을 done으로 업데이트
+9. **overlay_layouts 테이블 개선**: `job_variants_id` 컬럼 추가로 파이프라인 진행 문제 해결
 
 ---
 
@@ -733,8 +736,129 @@ WHERE job_variants_id = 'variant-1';
 
 ---
 
+---
+
+## 🐛 문제 해결 및 개선 사항
+
+### ✅ 문제 1: Variant가 특정 단계에서 멈추는 문제 해결
+
+**문제 상황**:
+- 일부 variant가 특정 단계(예: `vlm_analyze`)에서 `done` 상태인데 다음 단계로 진행되지 않음
+- 트리거가 발동되지 않거나 API 호출이 실패한 경우 발생
+
+**해결 방법**:
+- **멈춘 variant 자동 감지 및 재시도 로직 추가** (`services/job_state_listener.py`)
+- 5분 이상 업데이트되지 않은 `done` 상태 variant 감지
+- 같은 `job_id`의 다른 variant들이 더 진행된 경우 자동 재시도
+- `updated_at`을 업데이트하여 트리거 재발동
+
+**구현 코드**:
+```python
+# 멈춘 variant 감지 및 재시도
+if status == 'done' and current_step:
+    # 5분 이상 업데이트되지 않은 done 상태 variant 확인
+    stuck_variants = await conn.fetch("""
+        SELECT jv1.job_variants_id, jv1.current_step, jv1.updated_at
+        FROM jobs_variants jv1
+        WHERE jv1.job_id = $1
+          AND jv1.status = 'done'
+          AND jv1.current_step != 'iou_eval'
+          AND jv1.updated_at < NOW() - INTERVAL '5 minutes'
+          AND EXISTS (
+              SELECT 1
+              FROM jobs_variants jv2
+              WHERE jv2.job_id = jv1.job_id
+                AND jv2.current_step > jv1.current_step
+                AND jv2.status = 'done'
+          )
+    """, job_id)
+    
+    # 상태를 다시 업데이트하여 트리거 발동
+    for stuck in stuck_variants:
+        await conn.execute("""
+            UPDATE jobs_variants
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE job_variants_id = $1
+        """, stuck['job_variants_id'])
+```
+
+**동작 방식**:
+1. Variant 상태 변화 처리 후, 같은 `job_id`의 다른 variant들 확인
+2. 5분 이상 업데이트되지 않은 `done` 상태 variant 감지
+3. 다른 variant들이 더 진행된 단계에 있는 경우, 멈춘 variant의 `updated_at` 업데이트
+4. `updated_at` 변경으로 트리거 재발동하여 다음 단계 실행
+
+---
+
+### ✅ 문제 2: 일부 variant가 완료되지 않아도 job을 done으로 업데이트
+
+**문제 상황**:
+- 일부 variant가 특정 단계에서 멈춰있거나 실패한 경우
+- 나머지 variant들이 모두 `iou_eval`까지 완료되었어도
+- `jobs` 테이블이 `done`으로 업데이트되지 않아 무한 대기 상태
+
+**해결 방법**:
+- **iou_eval 단계 특별 처리 로직 추가** (`db/init/03_job_variants_state_notify_trigger.sql`)
+- `iou_eval` 단계에서 2개 이상의 variant가 완료되면 job을 `done`으로 업데이트
+- 또는 모든 variant가 `done` 또는 `failed` 상태인 경우 job을 `done`으로 업데이트
+
+**구현 코드**:
+```sql
+-- iou_eval 단계 특별 처리: 일부 variant가 완료되지 않아도 나머지가 모두 완료되면 job을 done으로 업데이트
+IF NEW.current_step = 'iou_eval' AND NEW.status = 'done' THEN
+    -- iou_eval에서 done인 variant 개수 확인
+    SELECT COUNT(*) INTO iou_eval_done_count
+    FROM jobs_variants
+    WHERE job_id = NEW.job_id
+      AND current_step = 'iou_eval'
+      AND status = 'done';
+    
+    -- 대부분의 variant가 완료되었거나 (2개 이상), 또는 모든 variant가 done/failed 상태인 경우
+    IF iou_eval_done_count >= 2 OR (done_count + failed_count) = total_count THEN
+        job_status := 'done';
+        job_current_step := 'iou_eval';
+    ELSE
+        job_status := 'running';
+        job_current_step := 'iou_eval';
+    END IF;
+END IF;
+```
+
+**동작 방식**:
+1. `iou_eval` 단계에서 variant가 `done`으로 변경될 때 트리거 발동
+2. `iou_eval`에서 `done`인 variant 개수 확인
+3. 2개 이상 완료되었거나, 모든 variant가 `done`/`failed` 상태이면 job을 `done`으로 업데이트
+4. 그렇지 않으면 job을 `running` 상태로 유지
+
+**장점**:
+- 일부 variant가 멈춰있어도 나머지 variant들이 완료되면 job을 완료 처리
+- 무한 대기 상태 방지
+- 실용적인 완료 조건 (2개 이상 완료 시 완료 처리)
+
+---
+
+## 📋 최근 변경사항 요약
+
+### 2025-11-28 (최신)
+1. ✅ **멈춘 variant 재시도 로직 추가** (`services/job_state_listener.py`)
+   - 5분 이상 업데이트되지 않은 variant 자동 감지
+   - 다른 variant들이 더 진행된 경우 자동 재시도
+
+2. ✅ **iou_eval 단계 특별 처리** (`db/init/03_job_variants_state_notify_trigger.sql`)
+   - 일부 variant가 완료되지 않아도 2개 이상 완료 시 job을 `done`으로 업데이트
+   - 무한 대기 상태 방지
+
+3. ✅ **overlay_layouts 테이블에 job_variants_id 컬럼 추가**
+   - `overlay_id` 조회 시 `job_variants_id`로 직접 조회 가능
+   - 파이프라인 진행 문제 해결
+
+4. ✅ **테스트 완료 시 상세 정보 출력 기능 추가** (`test/test_job_variants_pipeline.py`)
+   - job_id, job_variants_id, 각 단계별 이미지 절대 경로, eval 결과 출력
+
+---
+
 **작성일**: 2025-11-28  
 **최종 업데이트**: 2025-11-28  
 **작성자**: LEEYH205  
-**버전**: 2.0.0 (구현 완료, 매 단계 jobs 테이블 업데이트, thread-safe 모델 로딩)
+**버전**: 2.1.0 (멈춘 variant 재시도, iou_eval 특별 처리, overlay_layouts job_variants_id 추가)
 

@@ -32,6 +32,7 @@ class OverlayLayout(Base):
     
     overlay_id = Column(UUID(as_uuid=True), primary_key=True)
     proposal_id = Column(UUID(as_uuid=True), ForeignKey("planner_proposals.proposal_id"))
+    job_variants_id = Column(UUID(as_uuid=True), ForeignKey("jobs_variants.job_variants_id"), nullable=True)  # job_variants 연결
     layout = Column(JSONB)
     x_ratio = Column(Float)
     y_ratio = Column(Float)

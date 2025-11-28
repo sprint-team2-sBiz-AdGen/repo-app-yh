@@ -21,10 +21,11 @@ from PIL import Image
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from database import SessionLocal, Job, JobInput, ImageAsset, JobVariant
+from database import SessionLocal, Job, JobInput, ImageAsset, JobVariant, OverlayLayout, Evaluation, YOLORun, PlannerProposal
 from sqlalchemy import text
-from utils import save_asset
+from utils import save_asset, abs_from_url
 import logging
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -558,12 +559,165 @@ def main():
             
             # 최종 상태 확인
             print_table_status(db, job_info["job_id"], f"최종 상태 - Job {job_info['job_num']}")
+            
+            # 상세 정보 출력
+            print_detailed_results(db, job_info["job_id"])
         finally:
             db.close()
     
     print("\n" + "=" * 60)
     print("테스트 완료")
     print("=" * 60)
+
+def print_detailed_results(db, job_id: str):
+    """테스트 완료 시 상세 정보 출력"""
+    print("\n" + "=" * 80)
+    print("테스트 완료 상세 정보")
+    print("=" * 80)
+    
+    try:
+        job = db.query(Job).filter(Job.job_id == uuid.UUID(job_id)).first()
+        if not job:
+            print("❌ Job을 찾을 수 없습니다.")
+            return
+        
+        print(f"\n📋 Job 정보:")
+        print(f"   - job_id: {job.job_id}")
+        print(f"   - tenant_id: {job.tenant_id}")
+        print(f"   - status: {job.status}")
+        print(f"   - current_step: {job.current_step}")
+        
+        # Job Variants 조회
+        variants = db.execute(
+            text("""
+                SELECT job_variants_id, creation_order, status, current_step, img_asset_id
+                FROM jobs_variants
+                WHERE job_id = :job_id
+                ORDER BY creation_order
+            """),
+            {"job_id": job_id}
+        ).fetchall()
+        
+        print(f"\n📦 Job Variants (총 {len(variants)}개):")
+        
+        for variant in variants:
+            job_variants_id = variant[0]
+            creation_order = variant[1]
+            img_asset_id = variant[4]
+            
+            print(f"\n{'=' * 80}")
+            print(f"Variant {creation_order}")
+            print(f"{'=' * 80}")
+            print(f"   - job_variants_id: {job_variants_id}")
+            print(f"   - status: {variant[2]}")
+            print(f"   - current_step: {variant[3]}")
+            
+            # 1. 원본 이미지 (img_asset_id)
+            if img_asset_id:
+                image_asset = db.query(ImageAsset).filter(ImageAsset.image_asset_id == img_asset_id).first()
+                if image_asset:
+                    try:
+                        original_path = abs_from_url(image_asset.image_url)
+                        print(f"\n   📷 원본 이미지:")
+                        print(f"      - image_asset_id: {img_asset_id}")
+                        print(f"      - URL: {image_asset.image_url}")
+                        print(f"      - 절대 경로: {original_path}")
+                        print(f"      - 크기: {image_asset.width}x{image_asset.height}")
+                    except Exception as e:
+                        print(f"\n   📷 원본 이미지:")
+                        print(f"      - image_asset_id: {img_asset_id}")
+                        print(f"      - URL: {image_asset.image_url}")
+                        print(f"      - 절대 경로: (변환 실패: {e})")
+            
+            # 2. YOLO Detection 결과 (image_asset_id로 조회)
+            yolo_run = db.execute(
+                text("""
+                    SELECT yolo_run_id, image_asset_id, forbidden_mask_url, detection_count, latency_ms
+                    FROM yolo_runs
+                    WHERE image_asset_id = :image_asset_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """),
+                {"image_asset_id": img_asset_id}
+            ).first()
+            
+            if yolo_run:
+                print(f"\n   🎯 YOLO Detection:")
+                print(f"      - yolo_run_id: {yolo_run[0]}")
+                print(f"      - detection_count: {yolo_run[3]}")
+                if yolo_run[2]:  # forbidden_mask_url
+                    try:
+                        mask_path = abs_from_url(yolo_run[2])
+                        print(f"      - forbidden_mask_url: {yolo_run[2]}")
+                        print(f"      - forbidden_mask 절대 경로: {mask_path}")
+                    except Exception as e:
+                        print(f"      - forbidden_mask_url: {yolo_run[2]}")
+                        print(f"      - forbidden_mask 절대 경로: (변환 실패: {e})")
+            
+            # 3. Planner Proposal
+            planner_proposal = db.query(PlannerProposal).filter(
+                PlannerProposal.image_asset_id == img_asset_id
+            ).order_by(PlannerProposal.created_at.desc()).first()
+            
+            if planner_proposal:
+                print(f"\n   📐 Planner Proposal:")
+                print(f"      - proposal_id: {planner_proposal.proposal_id}")
+                if planner_proposal.layout:
+                    layout_data = planner_proposal.layout if isinstance(planner_proposal.layout, dict) else json.loads(planner_proposal.layout) if isinstance(planner_proposal.layout, str) else {}
+                    print(f"      - layout: {json.dumps(layout_data, indent=8, ensure_ascii=False)[:200]}...")
+            
+            # 4. Overlay Layout (최종 결과 이미지)
+            overlay_layout = db.query(OverlayLayout).filter(
+                OverlayLayout.job_variants_id == job_variants_id
+            ).order_by(OverlayLayout.created_at.desc()).first()
+            
+            if overlay_layout:
+                print(f"\n   🎨 Overlay Layout:")
+                print(f"      - overlay_id: {overlay_layout.overlay_id}")
+                print(f"      - proposal_id: {overlay_layout.proposal_id}")
+                
+                if overlay_layout.layout:
+                    layout_data = overlay_layout.layout if isinstance(overlay_layout.layout, dict) else json.loads(overlay_layout.layout) if isinstance(overlay_layout.layout, str) else {}
+                    render = layout_data.get('render', {})
+                    render_url = render.get('url') if render else None
+                    
+                    if render_url:
+                        try:
+                            render_path = abs_from_url(render_url)
+                            print(f"      - render URL: {render_url}")
+                            print(f"      - render 절대 경로: {render_path}")
+                            if render.get('width') and render.get('height'):
+                                print(f"      - render 크기: {render.get('width')}x{render.get('height')}")
+                        except Exception as e:
+                            print(f"      - render URL: {render_url}")
+                            print(f"      - render 절대 경로: (변환 실패: {e})")
+                    
+                    text_info = layout_data.get('text', '')
+                    if text_info:
+                        print(f"      - 오버레이 텍스트: {text_info[:100]}...")
+            
+            # 5. Evaluation 결과
+            evaluations = db.query(Evaluation).filter(
+                Evaluation.overlay_id == overlay_layout.overlay_id if overlay_layout else None
+            ).all()
+            
+            if evaluations:
+                print(f"\n   📊 Evaluation 결과:")
+                for eval_item in evaluations:
+                    print(f"      - evaluation_id: {eval_item.evaluation_id}")
+                    print(f"      - evaluation_type: {eval_item.evaluation_type}")
+                    if eval_item.metrics:
+                        metrics_data = eval_item.metrics if isinstance(eval_item.metrics, dict) else json.loads(eval_item.metrics) if isinstance(eval_item.metrics, str) else {}
+                        print(f"      - metrics: {json.dumps(metrics_data, indent=10, ensure_ascii=False)}")
+            else:
+                print(f"\n   📊 Evaluation 결과: 없음")
+        
+        print(f"\n{'=' * 80}")
+        
+    except Exception as e:
+        print(f"❌ 상세 정보 출력 오류: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

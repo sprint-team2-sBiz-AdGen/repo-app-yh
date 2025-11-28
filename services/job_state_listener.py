@@ -17,6 +17,7 @@ PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
 import asyncio
 import json
 import logging
+import uuid
 from typing import Optional
 import asyncpg
 from config import DATABASE_URL, JOB_STATE_LISTENER_RECONNECT_DELAY
@@ -215,6 +216,7 @@ class JobStateListener:
         try:
             from services.pipeline_trigger import trigger_next_pipeline_stage_for_variant
             
+            # 트리거 실행
             await trigger_next_pipeline_stage_for_variant(
                 job_variants_id=job_variants_id,
                 job_id=job_id,
@@ -223,6 +225,56 @@ class JobStateListener:
                 tenant_id=tenant_id,
                 img_asset_id=img_asset_id
             )
+            
+            # 멈춘 variant 감지 및 재시도: done 상태인데 오래 업데이트되지 않은 variant 확인
+            if status == 'done' and current_step:
+                import asyncio
+                import asyncpg
+                from config import DATABASE_URL
+                
+                # 5분 이상 업데이트되지 않은 done 상태 variant 확인
+                asyncpg_url = DATABASE_URL.replace("postgresql://", "postgres://")
+                try:
+                    conn = await asyncpg.connect(asyncpg_url)
+                    try:
+                        # 같은 job_id의 다른 variant들이 더 진행된 경우, 멈춘 variant 재시도
+                        stuck_variants = await conn.fetch("""
+                            SELECT jv1.job_variants_id, jv1.current_step, jv1.updated_at
+                            FROM jobs_variants jv1
+                            WHERE jv1.job_id = $1
+                              AND jv1.status = 'done'
+                              AND jv1.current_step != 'iou_eval'
+                              AND jv1.updated_at < NOW() - INTERVAL '5 minutes'
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM jobs_variants jv2
+                                  WHERE jv2.job_id = jv1.job_id
+                                    AND jv2.current_step > jv1.current_step
+                                    AND jv2.status = 'done'
+                              )
+                        """, uuid.UUID(job_id))
+                        
+                        for stuck in stuck_variants:
+                            stuck_id = str(stuck['job_variants_id'])
+                            stuck_step = stuck['current_step']
+                            logger.warning(
+                                f"멈춘 variant 감지: job_variants_id={stuck_id}, current_step={stuck_step}, "
+                                f"updated_at={stuck['updated_at']}"
+                            )
+                            
+                            # 상태를 다시 업데이트하여 트리거 발동
+                            await conn.execute("""
+                                UPDATE jobs_variants
+                                SET updated_at = CURRENT_TIMESTAMP
+                                WHERE job_variants_id = $1
+                            """, uuid.UUID(stuck_id))
+                            
+                            logger.info(f"멈춘 variant 재시도: job_variants_id={stuck_id}, current_step={stuck_step}")
+                    finally:
+                        await conn.close()
+                except Exception as retry_error:
+                    logger.debug(f"멈춘 variant 재시도 확인 중 오류 (무시): {retry_error}")
+                    
         except Exception as e:
             logger.error(
                 f"파이프라인 트리거 오류 (variant): job_variants_id={job_variants_id}, job_id={job_id}, error={e}",
