@@ -810,13 +810,13 @@ def main():
     """메인 테스트 함수"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="전체 Pipeline 테스트: llava stage1 -> yolo -> planner -> overlay")
+    parser = argparse.ArgumentParser(description="전체 Pipeline 테스트: llava stage1 -> yolo -> planner -> overlay -> llava stage2 -> ocr -> readability -> iou")
     parser.add_argument("--job-id", type=str, default=None,
                        help="테스트할 job_id (없으면 새로 생성)")
     parser.add_argument("--tenant-id", default="pipeline_test_tenant",
                        help="테스트용 tenant_id")
     parser.add_argument("--image-path", type=str, 
-                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_image9.png"),
+                       default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_image9.jpg"),
                        help="사용할 이미지 경로")
     parser.add_argument("--text-path", type=str,
                        default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_test", "pipeline_test_txt_kor1.txt"),
