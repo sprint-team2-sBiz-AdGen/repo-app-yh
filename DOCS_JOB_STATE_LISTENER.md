@@ -59,6 +59,141 @@ img_gen (done)
 
 ---
 
+## 📦 필수 패키지 설치
+
+### 1. Python 패키지
+
+Job State Listener를 사용하기 위해 다음 패키지가 필요합니다:
+
+```bash
+# requirements.txt에 이미 포함되어 있음
+asyncpg>=0.29.0  # PostgreSQL LISTEN/NOTIFY 지원
+httpx>=0.24.0    # 비동기 HTTP 클라이언트 (파이프라인 트리거용)
+```
+
+### 2. 설치 방법
+
+#### 방법 1: Docker 사용 (권장)
+
+Docker를 사용하는 경우, `requirements.txt`에 이미 포함되어 있으므로 별도 설치가 필요 없습니다:
+
+```bash
+# Docker 이미지 빌드 시 자동 설치됨
+docker-compose up --build
+```
+
+#### 방법 2: 로컬 설치
+
+로컬 환경에서 실행하는 경우:
+
+```bash
+# 가상환경 활성화 (선택사항)
+python3 -m venv venv
+source venv/bin/activate  # Linux/Mac
+# 또는
+venv\Scripts\activate  # Windows
+
+# 패키지 설치
+pip install -r requirements.txt
+
+# 또는 개별 설치
+pip install asyncpg>=0.29.0 httpx>=0.24.0
+```
+
+### 3. PostgreSQL 트리거 설정
+
+PostgreSQL 데이터베이스에 트리거 함수와 트리거를 생성해야 합니다.
+
+#### 트리거 함수 및 트리거 생성
+
+```sql
+-- 트리거 함수 생성
+CREATE OR REPLACE FUNCTION notify_job_state_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- current_step 또는 status가 변경된 경우에만 NOTIFY 발행
+    IF (OLD.current_step IS DISTINCT FROM NEW.current_step 
+       OR OLD.status IS DISTINCT FROM NEW.status) THEN
+        PERFORM pg_notify('job_state_changed', 
+            json_build_object(
+                'job_id', NEW.job_id,
+                'current_step', NEW.current_step,
+                'status', NEW.status,
+                'tenant_id', NEW.tenant_id
+            )::text
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 트리거 생성
+DROP TRIGGER IF EXISTS job_state_change_trigger ON jobs;
+CREATE TRIGGER job_state_change_trigger
+    AFTER UPDATE ON jobs
+    FOR EACH ROW
+    WHEN (OLD.current_step IS DISTINCT FROM NEW.current_step 
+       OR OLD.status IS DISTINCT FROM NEW.status)
+    EXECUTE FUNCTION notify_job_state_change();
+```
+
+#### 트리거 확인
+
+트리거가 정상적으로 생성되었는지 확인:
+
+```bash
+# 테스트 스크립트 실행
+docker exec feedlyai-work-yh python3 test/test_trigger_verification.py
+```
+
+또는 직접 SQL로 확인:
+
+```sql
+-- 트리거 함수 확인
+SELECT proname, prosrc 
+FROM pg_proc 
+WHERE proname = 'notify_job_state_change';
+
+-- 트리거 확인
+SELECT tgname, tgrelid::regclass, tgenabled 
+FROM pg_trigger 
+WHERE tgname = 'job_state_change_trigger';
+```
+
+### 4. 환경 변수 설정
+
+`.env` 파일에 다음 환경 변수를 설정합니다:
+
+```bash
+# Job State Listener 설정
+ENABLE_JOB_STATE_LISTENER=true
+JOB_STATE_LISTENER_RECONNECT_DELAY=5
+
+# 데이터베이스 연결 설정
+DB_HOST=host.docker.internal  # 또는 실제 DB 호스트
+DB_PORT=5432
+DB_NAME=feedlyai
+DB_USER=feedlyai
+DB_PASSWORD=your_password
+```
+
+### 5. 설치 확인
+
+설치가 완료되었는지 확인:
+
+```bash
+# Python 패키지 확인
+docker exec feedlyai-work-yh pip list | grep -E "asyncpg|httpx"
+
+# 리스너 시작 확인
+docker logs feedlyai-work-yh | grep "Job State Listener 시작"
+
+# PostgreSQL 연결 확인
+docker logs feedlyai-work-yh | grep "PostgreSQL 연결 성공"
+```
+
+---
+
 ## 🚀 사용 방법
 
 ### 1. 리스너 활성화 확인
