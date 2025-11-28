@@ -745,48 +745,67 @@ WHERE job_variants_id = 'variant-1';
 **문제 상황**:
 - 일부 variant가 특정 단계(예: `vlm_analyze`)에서 `done` 상태인데 다음 단계로 진행되지 않음
 - 트리거가 발동되지 않거나 API 호출이 실패한 경우 발생
+- Job의 `current_step`이 진행 중인데 일부 variant가 뒤처져 있는 경우
 
 **해결 방법**:
-- **멈춘 variant 자동 감지 및 재시도 로직 추가** (`services/job_state_listener.py`)
-- 5분 이상 업데이트되지 않은 `done` 상태 variant 감지
-- 같은 `job_id`의 다른 variant들이 더 진행된 경우 자동 재시도
-- `updated_at`을 업데이트하여 트리거 재발동
+- **뒤처진 variant 자동 감지 및 재시작 로직 추가** (`services/job_state_listener.py`)
+- Job 상태가 `running` 또는 `failed`이고 yh 파트 단계일 때 뒤처진 variants 확인
+- Job의 `current_step`보다 뒤처진 variant 감지
+- `done` 또는 `failed` 상태인 variant를 다음 단계로 재시작 시도
 
 **구현 코드**:
 ```python
-# 멈춘 variant 감지 및 재시도
-if status == 'done' and current_step:
-    # 5분 이상 업데이트되지 않은 done 상태 variant 확인
-    stuck_variants = await conn.fetch("""
-        SELECT jv1.job_variants_id, jv1.current_step, jv1.updated_at
-        FROM jobs_variants jv1
-        WHERE jv1.job_id = $1
-          AND jv1.status = 'done'
-          AND jv1.current_step != 'iou_eval'
-          AND jv1.updated_at < NOW() - INTERVAL '5 minutes'
-          AND EXISTS (
-              SELECT 1
-              FROM jobs_variants jv2
-              WHERE jv2.job_id = jv1.job_id
-                AND jv2.current_step > jv1.current_step
-                AND jv2.status = 'done'
-          )
-    """, job_id)
-    
-    # 상태를 다시 업데이트하여 트리거 발동
-    for stuck in stuck_variants:
-        await conn.execute("""
-            UPDATE jobs_variants
-            SET updated_at = CURRENT_TIMESTAMP
-            WHERE job_variants_id = $1
-        """, stuck['job_variants_id'])
+async def _recover_stuck_variants(
+    self,
+    job_id: str,
+    job_current_step: str,
+    tenant_id: str,
+    step_order: dict
+):
+    """뒤처진 variants 감지 및 재시작"""
+    # Job의 current_step보다 뒤처진 variant 찾기
+    for variant in variants:
+        variant_step_order = step_order.get(variant_step, -1)
+        
+        # Variant가 Job보다 뒤처져 있는 경우
+        if variant_step_order >= 0 and variant_step_order < job_step_order:
+            # 재시작 전에 variant 상태를 다시 확인
+            # 상태가 변경되었으면 스킵 (이미 처리됨)
+            
+            # Variant가 done 상태이면 다음 단계 트리거
+            if variant_status == 'done':
+                await trigger_next_pipeline_stage_for_variant(...)
+            
+            # Variant가 failed 상태이면 재시도 (다음 단계로 진행 시도)
+            elif variant_status == 'failed':
+                # failed 상태를 done으로 변경하여 다음 단계로 진행 시도
+                await conn.execute("""
+                    UPDATE jobs_variants
+                    SET status = 'done', updated_at = CURRENT_TIMESTAMP
+                    WHERE job_variants_id = $1
+                """, variant_id)
+                await trigger_next_pipeline_stage_for_variant(...)
 ```
 
 **동작 방식**:
-1. Variant 상태 변화 처리 후, 같은 `job_id`의 다른 variant들 확인
-2. 5분 이상 업데이트되지 않은 `done` 상태 variant 감지
-3. 다른 variant들이 더 진행된 단계에 있는 경우, 멈춘 variant의 `updated_at` 업데이트
-4. `updated_at` 변경으로 트리거 재발동하여 다음 단계 실행
+1. Job 상태가 `running` 또는 `failed`이고 yh 파트 단계일 때 `_recover_stuck_variants` 호출
+2. 해당 job의 모든 variants 조회
+3. Job의 `current_step`보다 뒤처진 variant 감지
+4. 재시작 전에 variant 상태를 다시 확인 (다른 프로세스가 이미 처리했을 수 있음)
+5. 상태가 변경되지 않았으면 다음 단계로 재시작 시도
+6. `failed` 상태인 경우 `done`으로 변경 후 재시작 시도
+
+**실제 동작 관찰 (테스트 결과)**:
+- 뒤처진 variant가 감지되었지만, 재시작 로직이 실행되기 전에
+- 기존 Job variant 상태 변화 트리거가 먼저 실행되어 자동으로 다음 단계를 진행시킴
+- 즉, 명시적인 복구 로직 없이도 파이프라인이 정상적으로 완료됨
+- 이는 Job variant 상태 변화 트리거가 각 variant의 상태 변화를 감지하여
+  자동으로 다음 단계를 진행시키기 때문임
+
+**결론**:
+- 뒤처진 variant 복구 로직은 안전장치 역할을 함
+- 대부분의 경우 기존 트리거 메커니즘으로 자연스럽게 해결됨
+- 하지만 명시적인 복구가 필요한 경우(예: 트리거가 발동되지 않은 경우)를 대비하여 구현됨
 
 ---
 
@@ -840,9 +859,11 @@ END IF;
 ## 📋 최근 변경사항 요약
 
 ### 2025-11-28 (최신)
-1. ✅ **멈춘 variant 재시도 로직 추가** (`services/job_state_listener.py`)
-   - 5분 이상 업데이트되지 않은 variant 자동 감지
-   - 다른 variant들이 더 진행된 경우 자동 재시도
+1. ✅ **뒤처진 variant 복구 로직 추가** (`services/job_state_listener.py`)
+   - Job 상태가 `running` 또는 `failed`일 때 뒤처진 variants 자동 감지
+   - Job의 `current_step`보다 뒤처진 variant를 다음 단계로 재시작 시도
+   - `failed` 상태 variant도 재시도하여 다음 단계로 진행 시도
+   - **참고**: 실제 테스트 결과, 대부분의 경우 기존 Job variant 상태 변화 트리거가 먼저 실행되어 자동으로 해결됨
 
 2. ✅ **iou_eval 단계 특별 처리** (`db/init/03_job_variants_state_notify_trigger.sql`)
    - 일부 variant가 완료되지 않아도 2개 이상 완료 시 job을 `done`으로 업데이트
@@ -855,10 +876,15 @@ END IF;
 4. ✅ **테스트 완료 시 상세 정보 출력 기능 추가** (`test/test_job_variants_pipeline.py`)
    - job_id, job_variants_id, 각 단계별 이미지 절대 경로, eval 결과 출력
 
+5. ✅ **뒤처진 variant 복구 로직 테스트 및 분석**
+   - 실제 테스트에서 뒤처진 variant 감지 확인 (7회)
+   - 기존 트리거 메커니즘이 먼저 실행되어 자동으로 해결됨을 확인
+   - 복구 로직은 안전장치 역할을 함
+
 ---
 
 **작성일**: 2025-11-28  
 **최종 업데이트**: 2025-11-28  
 **작성자**: LEEYH205  
-**버전**: 2.1.0 (멈춘 variant 재시도, iou_eval 특별 처리, overlay_layouts job_variants_id 추가)
+**버전**: 2.2.0 (뒤처진 variant 복구 로직 추가 및 테스트 결과 반영, iou_eval 특별 처리, overlay_layouts job_variants_id 추가)
 

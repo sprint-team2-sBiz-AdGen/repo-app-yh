@@ -6,7 +6,7 @@ PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
 # updated_at: 2025-11-28
 # author: LEEYH205
 # description: PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
-# version: 1.1.0
+# version: 2.2.0
 # status: development
 # tags: database, listener, notify
 # dependencies: asyncpg, fastapi
@@ -187,8 +187,31 @@ class JobStateListener:
         status: str,
         tenant_id: str
     ):
-        """Job 상태 변화 처리 및 다음 단계 트리거 (기존 jobs 테이블용)"""
+        """Job 상태 변화 처리 및 뒤처진 variants 재시작"""
         try:
+            # yh 파트 단계 정의
+            YH_STEPS = ['vlm_analyze', 'yolo_detect', 'planner', 'overlay', 
+                        'vlm_judge', 'ocr_eval', 'readability_eval', 'iou_eval']
+            
+            # 단계 순서 정의
+            STEP_ORDER = {
+                'img_gen': 0,
+                'vlm_analyze': 1,
+                'yolo_detect': 2,
+                'planner': 3,
+                'overlay': 4,
+                'vlm_judge': 5,
+                'ocr_eval': 6,
+                'readability_eval': 7,
+                'iou_eval': 8
+            }
+            
+            # Job이 running 또는 failed 상태이고 yh 파트 단계인 경우 뒤처진 variants 확인
+            # (failed 상태도 확인하여 실패한 variants를 재시도)
+            if status in ['running', 'failed'] and current_step and current_step in YH_STEPS:
+                await self._recover_stuck_variants(job_id, current_step, tenant_id, STEP_ORDER)
+            
+            # 기존 로직 유지 (하위 호환성)
             from services.pipeline_trigger import trigger_next_pipeline_stage
             
             await trigger_next_pipeline_stage(
@@ -200,6 +223,218 @@ class JobStateListener:
         except Exception as e:
             logger.error(
                 f"파이프라인 트리거 오류: job_id={job_id}, error={e}",
+                exc_info=True
+            )
+    
+    async def _recover_stuck_variants(
+        self,
+        job_id: str,
+        job_current_step: str,
+        tenant_id: str,
+        step_order: dict
+    ):
+        """뒤처진 variants 감지 및 재시작"""
+        try:
+            import asyncpg
+            from config import DATABASE_URL
+            from services.pipeline_trigger import trigger_next_pipeline_stage_for_variant
+            
+            job_step_order = step_order.get(job_current_step, -1)
+            if job_step_order < 0:
+                logger.debug(f"알 수 없는 단계: job_id={job_id}, current_step={job_current_step}")
+                return
+            
+            asyncpg_url = DATABASE_URL.replace("postgresql://", "postgres://")
+            conn = await asyncpg.connect(asyncpg_url)
+            try:
+                # 해당 job의 모든 variants 조회
+                variants = await conn.fetch("""
+                    SELECT job_variants_id, current_step, status, img_asset_id, creation_order
+                    FROM jobs_variants
+                    WHERE job_id = $1
+                    ORDER BY creation_order
+                """, uuid.UUID(job_id))
+                
+                if not variants:
+                    logger.debug(f"Variants를 찾을 수 없음: job_id={job_id}")
+                    return
+                
+                # 뒤처진 variants 찾기
+                stuck_count = 0
+                recovered_count = 0
+                failed_count = 0
+                
+                for variant in variants:
+                    variant_id = variant['job_variants_id']
+                    variant_step = variant['current_step']
+                    variant_status = variant['status']
+                    variant_step_order = step_order.get(variant_step, -1)
+                    
+                    # Variant가 Job보다 뒤처져 있는 경우
+                    if variant_step_order >= 0 and variant_step_order < job_step_order:
+                        stuck_count += 1
+                        logger.warning(
+                            f"뒤처진 variant 감지: job_id={job_id}, "
+                            f"job_step={job_current_step} (order: {job_step_order}), "
+                            f"variant_id={variant_id}, "
+                            f"variant_step={variant_step} (order: {variant_step_order}), "
+                            f"variant_status={variant_status}, "
+                            f"creation_order={variant['creation_order']}"
+                        )
+                        
+                        # 재시작 전에 variant 상태를 다시 확인 (다른 프로세스가 이미 처리했을 수 있음)
+                        current_variant = await conn.fetchrow("""
+                            SELECT status, current_step
+                            FROM jobs_variants
+                            WHERE job_variants_id = $1
+                        """, variant_id)
+                        
+                        if not current_variant:
+                            logger.warning(f"Variant를 찾을 수 없음: job_variants_id={variant_id}")
+                            continue
+                        
+                        # 상태가 변경되었으면 스킵 (이미 처리됨)
+                        if (current_variant['status'] != variant_status or 
+                            current_variant['current_step'] != variant_step):
+                            logger.info(
+                                f"Variant 상태가 변경되어 스킵: job_variants_id={variant_id}, "
+                                f"old: {variant_step} ({variant_status}), "
+                                f"new: {current_variant['current_step']} ({current_variant['status']})"
+                            )
+                            continue
+                        
+                        # Variant가 done 상태이면 다음 단계 트리거
+                        if variant_status == 'done':
+                            try:
+                                logger.info(
+                                    f"뒤처진 variant 재시작 시도: job_variants_id={variant_id}, "
+                                    f"current_step={variant_step} → 다음 단계"
+                                )
+                                
+                                await trigger_next_pipeline_stage_for_variant(
+                                    job_variants_id=str(variant_id),
+                                    job_id=job_id,
+                                    current_step=variant_step,
+                                    status='done',
+                                    tenant_id=tenant_id,
+                                    img_asset_id=str(variant['img_asset_id']) if variant['img_asset_id'] else ''
+                                )
+                                
+                                # 재시작 후 상태 확인 (약간의 지연 후)
+                                import asyncio
+                                await asyncio.sleep(1)
+                                
+                                updated_variant = await conn.fetchrow("""
+                                    SELECT status, current_step
+                                    FROM jobs_variants
+                                    WHERE job_variants_id = $1
+                                """, variant_id)
+                                
+                                if updated_variant and updated_variant['current_step'] != variant_step:
+                                    recovered_count += 1
+                                    logger.info(
+                                        f"✅ 뒤처진 variant 재시작 성공: job_variants_id={variant_id}, "
+                                        f"{variant_step} → {updated_variant['current_step']}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"⚠️  뒤처진 variant 재시작 후 상태 미변경: job_variants_id={variant_id}, "
+                                        f"current_step={variant_step}"
+                                    )
+                                    
+                            except Exception as trigger_error:
+                                failed_count += 1
+                                logger.error(
+                                    f"❌ 뒤처진 variant 재시작 실패: job_variants_id={variant_id}, "
+                                    f"current_step={variant_step}, error={trigger_error}",
+                                    exc_info=True
+                                )
+                        
+                        # Variant가 failed 상태이면 재시도 (다음 단계로 진행 시도)
+                        elif variant_status == 'failed':
+                            try:
+                                logger.info(
+                                    f"실패한 variant 재시도: job_variants_id={variant_id}, "
+                                    f"current_step={variant_step}"
+                                )
+                                
+                                # failed 상태를 done으로 변경하여 다음 단계로 진행 시도
+                                # (실패한 단계를 건너뛰고 다음 단계로 진행)
+                                await conn.execute("""
+                                    UPDATE jobs_variants
+                                    SET status = 'done',
+                                        updated_at = CURRENT_TIMESTAMP
+                                    WHERE job_variants_id = $1
+                                """, variant_id)
+                                
+                                # 다음 단계 트리거
+                                await trigger_next_pipeline_stage_for_variant(
+                                    job_variants_id=str(variant_id),
+                                    job_id=job_id,
+                                    current_step=variant_step,
+                                    status='done',  # done 상태로 변경하여 다음 단계 진행
+                                    tenant_id=tenant_id,
+                                    img_asset_id=str(variant['img_asset_id']) if variant['img_asset_id'] else ''
+                                )
+                                
+                                # 재시도 후 상태 확인
+                                import asyncio
+                                await asyncio.sleep(1)
+                                
+                                updated_variant = await conn.fetchrow("""
+                                    SELECT status, current_step
+                                    FROM jobs_variants
+                                    WHERE job_variants_id = $1
+                                """, variant_id)
+                                
+                                if updated_variant and updated_variant['status'] != 'failed':
+                                    recovered_count += 1
+                                    logger.info(
+                                        f"✅ 실패한 variant 재시도 성공: job_variants_id={variant_id}, "
+                                        f"{variant_step} ({variant_status}) → {updated_variant['current_step']} ({updated_variant['status']})"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"⚠️  실패한 variant 재시도 후 여전히 failed: job_variants_id={variant_id}"
+                                    )
+                                    
+                            except Exception as retry_error:
+                                failed_count += 1
+                                logger.error(
+                                    f"❌ 실패한 variant 재시도 실패: job_variants_id={variant_id}, "
+                                    f"error={retry_error}",
+                                    exc_info=True
+                                )
+                        
+                        # Variant가 running 상태이고 오래 실행 중인 경우 (5분 이상)
+                        elif variant_status == 'running':
+                            from datetime import datetime, timezone
+                            updated_at = variant.get('updated_at')
+                            if updated_at:
+                                if isinstance(updated_at, datetime):
+                                    time_diff = (datetime.now(timezone.utc) - updated_at.replace(tzinfo=timezone.utc)).total_seconds()
+                                    if time_diff > 300:  # 5분 이상
+                                        logger.warning(
+                                            f"오래 실행 중인 variant 감지: job_variants_id={variant_id}, "
+                                            f"running 시간: {int(time_diff)}초, current_step={variant_step}"
+                                        )
+                                        
+                                        # 상태를 다시 확인하여 필요시 재시도
+                                        # (현재는 로깅만, 추후 재시도 로직 추가 가능)
+                
+                if stuck_count > 0:
+                    logger.info(
+                        f"뒤처진 variants 복구 완료: job_id={job_id}, "
+                        f"job_step={job_current_step}, "
+                        f"stuck_count={stuck_count}, "
+                        f"recovered_count={recovered_count}, "
+                        f"failed_count={failed_count}"
+                    )
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.error(
+                f"뒤처진 variants 복구 오류: job_id={job_id}, error={e}",
                 exc_info=True
             )
     
