@@ -3,10 +3,11 @@ PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
 """
 ########################################################
 # created_at: 2025-11-28
-# updated_at: 2025-11-28
+# updated_at: 2025-11-29
 # author: LEEYH205
 # description: PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
-# version: 2.2.0
+# version: 2.3.0
+# changes: iou_eval 단계 수동 복구 로직 추가 (주기적 체크)
 # status: development
 # tags: database, listener, notify
 # dependencies: asyncpg, fastapi
@@ -32,15 +33,27 @@ class JobStateListener:
         self.running = False
         self.reconnect_delay = JOB_STATE_LISTENER_RECONNECT_DELAY
         self.pending_tasks: set = set()  # 실행 중인 태스크 추적
+        self.recovery_check_interval = 60  # 수동 복구 체크 간격 (초, 기본 1분)
+        self.recovery_task: Optional[asyncio.Task] = None  # 수동 복구 백그라운드 태스크
     
     async def start(self):
         """리스너 시작"""
         self.running = True
+        # 수동 복구 백그라운드 태스크 시작
+        self.recovery_task = asyncio.create_task(self._periodic_recovery_check())
         await self._listen_loop()
     
     async def stop(self):
         """리스너 중지 (실행 중인 태스크 완료 대기)"""
         self.running = False
+        
+        # 수동 복구 태스크 중지
+        if self.recovery_task and not self.recovery_task.done():
+            self.recovery_task.cancel()
+            try:
+                await self.recovery_task
+            except asyncio.CancelledError:
+                logger.info("수동 복구 태스크 중지됨")
         
         # 실행 중인 태스크 완료 대기
         if self.pending_tasks:
@@ -515,6 +528,114 @@ class JobStateListener:
                 f"파이프라인 트리거 오류 (variant): job_variants_id={job_variants_id}, job_id={job_id}, error={e}",
                 exc_info=True
             )
+    
+    async def _periodic_recovery_check(self):
+        """주기적으로 iou_eval 단계에서 모든 variants가 done인데 job이 done이 아닌 경우 수정"""
+        logger.info(f"수동 복구 체크 시작 (간격: {self.recovery_check_interval}초)")
+        
+        while self.running:
+            try:
+                await asyncio.sleep(self.recovery_check_interval)
+                
+                if not self.running:
+                    break
+                
+                await self._check_and_fix_iou_eval_jobs()
+                
+            except asyncio.CancelledError:
+                logger.info("수동 복구 체크 취소됨")
+                break
+            except Exception as e:
+                logger.error(f"수동 복구 체크 오류: {e}", exc_info=True)
+                # 오류 발생 시에도 계속 실행
+                await asyncio.sleep(10)  # 오류 발생 시 10초 대기 후 재시도
+    
+    async def _check_and_fix_iou_eval_jobs(self):
+        """iou_eval 단계에서 모든 variants가 done인데 job이 done이 아닌 경우 수정"""
+        try:
+            import asyncpg
+            from config import DATABASE_URL
+            
+            asyncpg_url = DATABASE_URL.replace("postgresql://", "postgres://")
+            conn = await asyncpg.connect(asyncpg_url)
+            
+            try:
+                # 조건을 만족하는 job 찾기
+                # - current_step = 'iou_eval'
+                # - status = 'running'
+                # - 모든 variants가 iou_eval, done
+                # - failed, running, queued variant 없음
+                jobs_to_fix = await conn.fetch("""
+                    SELECT 
+                        j.job_id,
+                        j.status,
+                        j.current_step,
+                        COUNT(jv.job_variants_id) as total_variants,
+                        COUNT(*) FILTER (WHERE jv.status = 'done' AND jv.current_step = 'iou_eval') as iou_done_count,
+                        COUNT(*) FILTER (WHERE jv.status = 'failed') as failed_count,
+                        COUNT(*) FILTER (WHERE jv.status = 'running') as running_count,
+                        COUNT(*) FILTER (WHERE jv.status = 'queued') as queued_count
+                    FROM jobs j
+                    INNER JOIN jobs_variants jv ON j.job_id = jv.job_id
+                    WHERE j.current_step = 'iou_eval'
+                      AND j.status = 'running'
+                    GROUP BY j.job_id, j.status, j.current_step
+                    HAVING COUNT(*) FILTER (WHERE jv.status = 'done' AND jv.current_step = 'iou_eval') = COUNT(jv.job_variants_id)
+                       AND COUNT(*) FILTER (WHERE jv.status = 'failed') = 0
+                       AND COUNT(*) FILTER (WHERE jv.status = 'running') = 0
+                       AND COUNT(*) FILTER (WHERE jv.status = 'queued') = 0
+                """)
+                
+                if jobs_to_fix:
+                    logger.warning(
+                        f"수동 복구 대상 발견: {len(jobs_to_fix)}개 job이 iou_eval, done 조건을 만족하지만 running 상태"
+                    )
+                    
+                    fixed_count = 0
+                    for job in jobs_to_fix:
+                        job_id = job['job_id']
+                        total = job['total_variants']
+                        iou_done = job['iou_done_count']
+                        
+                        try:
+                            # Job을 done으로 업데이트
+                            result = await conn.execute("""
+                                UPDATE jobs
+                                SET status = 'done',
+                                    current_step = 'iou_eval',
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE job_id = $1
+                                  AND status = 'running'
+                                  AND current_step = 'iou_eval'
+                            """, job_id)
+                            
+                            if result == "UPDATE 1":
+                                fixed_count += 1
+                                logger.info(
+                                    f"✅ 수동 복구 완료: job_id={job_id}, "
+                                    f"variants: {iou_done}/{total} 모두 iou_eval, done"
+                                )
+                            else:
+                                logger.debug(
+                                    f"수동 복구 스킵: job_id={job_id} (이미 처리됨 또는 상태 변경됨)"
+                                )
+                                
+                        except Exception as fix_error:
+                            logger.error(
+                                f"수동 복구 실패: job_id={job_id}, error={fix_error}",
+                                exc_info=True
+                            )
+                    
+                    if fixed_count > 0:
+                        logger.info(f"수동 복구 완료: {fixed_count}개 job을 done으로 업데이트")
+                else:
+                    logger.debug("수동 복구 대상 없음 (모든 job이 정상 상태)")
+                    
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logger.error(f"수동 복구 체크 오류: {e}", exc_info=True)
 
 
 # 전역 리스너 인스턴스

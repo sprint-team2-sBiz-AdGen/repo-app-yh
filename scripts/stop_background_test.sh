@@ -80,3 +80,5 @@ echo "  - Job 생성: $LOG_DIR/job_creator.log"
 echo "  - 모니터링: $LOG_DIR/job_monitor.log"
 echo "============================================================"
 
+
+

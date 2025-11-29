@@ -670,7 +670,10 @@ def llava_stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
 - `_connect_and_listen()`: PostgreSQL 연결 및 LISTEN
 - `_handle_variant_notification()`: NOTIFY 이벤트 처리
 - `_process_job_variant_state_change()`: Variant 상태 변화 처리
+- `_process_job_state_change()`: Job 상태 변화 처리 및 뒤처진 variants 복구
 - `_recover_stuck_variants()`: 뒤처진 variants 복구
+- `_periodic_recovery_check()`: 주기적 수동 복구 체크 (백그라운드 태스크)
+- `_check_and_fix_iou_eval_jobs()`: iou_eval 단계에서 job이 done이 아닌 경우 수정
 
 ### 3. 파이프라인 트리거 (`services/pipeline_trigger.py`)
 
@@ -809,6 +812,7 @@ def llava_stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
 - **뒤처진 Variant 감지**: Job이 진행 중인데 Variant가 뒤처진 경우
 - **자동 재시작**: 다음 단계로 자동 트리거
 - **실패 처리**: `failed` 상태도 재시도 가능
+- **수동 복구 로직**: 트리거가 작동하지 않는 경우 주기적으로 확인하고 수정 (1분 간격)
 
 ---
 
@@ -896,7 +900,53 @@ async def lifespan(app: FastAPI):
 
 ---
 
+---
+
+## 🔧 복구 메커니즘 상세
+
+### 1. 뒤처진 Variants 자동 재시작
+
+**트리거**: Job 상태가 `running` 또는 `failed`로 변경되고 yh 파트 단계인 경우
+
+**동작**:
+1. 해당 job의 모든 variants 조회
+2. Job의 `current_step`보다 뒤처진 variants 찾기
+3. 각 variant의 상태에 따라 처리:
+   - `done` 상태: 다음 단계 트리거
+   - `failed` 상태: 재시도 (다음 단계로 진행)
+   - `running` 상태: 5분 이상 실행 중인 경우 감지
+
+**구현 위치**: `services/job_state_listener.py`의 `_process_job_state_change()`
+
+### 2. 수동 복구 로직
+
+**목적**: 트리거가 작동하지 않는 경우를 대비하여 주기적으로 확인하고 수정
+
+**동작**:
+1. 리스너 시작 시 백그라운드 태스크로 자동 실행
+2. 매 1분마다 (기본값) 다음 조건 확인:
+   - `current_step = 'iou_eval'`
+   - `status = 'running'`
+   - 모든 variants가 `iou_eval, done`
+   - `failed`, `running`, `queued` variant 없음
+3. 조건을 만족하는 job을 자동으로 `done`으로 업데이트
+
+**구현 위치**: `services/job_state_listener.py`의 `_periodic_recovery_check()` 및 `_check_and_fix_iou_eval_jobs()`
+
+**설정**:
+- 체크 간격: `self.recovery_check_interval = 60` (초, 기본 1분)
+- 리스너 시작 시 자동 실행
+- 리스너 중지 시 자동 취소
+
+**로깅**:
+- 복구 대상 발견: `WARNING` 레벨
+- 복구 완료: `INFO` 레벨 (job_id, variants 개수 포함)
+- 오류 발생: `ERROR` 레벨
+
+---
+
 **작성일**: 2025-11-28  
+**최종 업데이트**: 2025-11-29  
 **작성자**: LEEYH205  
-**버전**: 1.0.0
+**버전**: 1.1.0
 
