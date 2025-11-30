@@ -2,7 +2,7 @@
 """데이터베이스 모델 및 세션 관리"""
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-28
+# updated_at: 2025-11-30
 # author: LEEYH205
 # description: Database model and session management logic
 # version: 1.1.0
@@ -108,10 +108,12 @@ class JobVariant(Base):
     job_variants_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"))
     img_asset_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"))
+    overlaid_img_asset_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"), nullable=True)  # 최종 overlay 이미지 에셋 참조
     creation_order = Column(Integer, nullable=False)
     selected = Column(String(10), default='false')  # BOOLEAN -> String으로 처리 (DB에서 'true'/'false' 문자열)
     status = Column(String(50), default='queued')  # queued, running, done, failed
     current_step = Column(String(255), default='vlm_analyze')  # 'vlm_analyze', 'yolo_detect', 'planner', 'overlay', 'vlm_judge', 'ocr_eval', 'readability_eval', 'iou_eval'
+    retry_count = Column(Integer, default=0)  # 재시도 횟수
     pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

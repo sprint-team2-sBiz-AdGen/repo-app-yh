@@ -7,7 +7,7 @@
 # - evaluations 테이블에 결과 저장
 ########################################################
 # created_at: 2025-11-26
-# updated_at: 2025-11-28
+# updated_at: 2025-11-30
 # author: LEEYH205
 # description: OCR evaluation API
 # version: 1.1.0
@@ -28,7 +28,7 @@ import time
 from models import OCREvalIn, OCREvalOut
 from utils import abs_from_url
 from services.ocr_service import extract_text_from_image, calculate_ocr_accuracy
-from database import get_db, Job, OverlayLayout, JobVariant
+from database import get_db, Job, OverlayLayout, JobVariant, ImageAsset
 import logging
 
 logger = logging.getLogger(__name__)
@@ -133,21 +133,36 @@ def evaluate_ocr(body: OCREvalIn, db: Session = Depends(get_db)):
                 detail=f"Overlay layout not found: {body.overlay_id}"
             )
         
-        # overlay.layout에서 텍스트와 이미지 URL 가져오기
+        # overlay.layout에서 텍스트 가져오기
         layout = overlay.layout if isinstance(overlay.layout, dict) else json.loads(overlay.layout) if isinstance(overlay.layout, str) else {}
         original_text = layout.get('text', '')
-        render = layout.get('render', {})
-        render_asset_url = render.get('url')
-        
-        if not render_asset_url:
-            logger.error(f"Render URL not found in overlay layout: overlay_id={body.overlay_id}")
-            raise HTTPException(
-                status_code=404,
-                detail=f"Render URL not found in overlay layout"
-            )
         
         if not original_text:
             logger.warning(f"Original text is empty in overlay layout: overlay_id={body.overlay_id}")
+        
+        # Step 1.5: job_variant에서 overlaid_img_asset_id 조회
+        render_asset_url = None
+        if job_variant.overlaid_img_asset_id:
+            overlaid_asset = db.query(ImageAsset).filter(
+                ImageAsset.image_asset_id == job_variant.overlaid_img_asset_id
+            ).first()
+            if overlaid_asset:
+                render_asset_url = overlaid_asset.image_url
+                logger.info(f"Found overlaid image from jobs_variants: image_asset_id={job_variant.overlaid_img_asset_id}, url={render_asset_url}")
+        
+        # Fallback: overlay.layout에서 render URL 가져오기 (하위 호환성)
+        if not render_asset_url:
+            render = layout.get('render', {})
+            render_asset_url = render.get('url')
+            if render_asset_url:
+                logger.warning(f"Using render URL from overlay_layouts (fallback): overlay_id={body.overlay_id}")
+        
+        if not render_asset_url:
+            logger.error(f"Render URL not found: overlay_id={body.overlay_id}, job_variants_id={body.job_variants_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Render URL not found in job_variant or overlay layout"
+            )
         
         # Step 2: 이미지 로드
         try:

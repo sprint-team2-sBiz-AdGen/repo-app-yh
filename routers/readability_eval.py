@@ -7,7 +7,7 @@
 # - evaluations 테이블에 결과 저장
 ########################################################
 # created_at: 2025-11-26
-# updated_at: 2025-11-28
+# updated_at: 2025-11-30
 # author: LEEYH205
 # description: Readability evaluation API
 # version: 1.1.0
@@ -28,7 +28,7 @@ import time
 from models import ReadabilityEvalIn, ReadabilityEvalOut
 from utils import abs_from_url
 from services.readability_service import evaluate_readability
-from database import get_db, Job, OverlayLayout, JobVariant
+from database import get_db, Job, OverlayLayout, JobVariant, ImageAsset
 import logging
 
 logger = logging.getLogger(__name__)
@@ -137,14 +137,29 @@ def evaluate_readability_api(body: ReadabilityEvalIn, db: Session = Depends(get_
         text_color = layout.get('text_color', 'FFFFFF')
         overlay_color = layout.get('overlay_color')
         text_size = layout.get('text_size')
-        render = layout.get('render', {})
-        render_asset_url = render.get('url')
+        
+        # Step 1.5: job_variant에서 overlaid_img_asset_id 조회
+        render_asset_url = None
+        if job_variant.overlaid_img_asset_id:
+            overlaid_asset = db.query(ImageAsset).filter(
+                ImageAsset.image_asset_id == job_variant.overlaid_img_asset_id
+            ).first()
+            if overlaid_asset:
+                render_asset_url = overlaid_asset.image_url
+                logger.info(f"Found overlaid image from jobs_variants: image_asset_id={job_variant.overlaid_img_asset_id}, url={render_asset_url}")
+        
+        # Fallback: overlay.layout에서 render URL 가져오기 (하위 호환성)
+        if not render_asset_url:
+            render = layout.get('render', {})
+            render_asset_url = render.get('url')
+            if render_asset_url:
+                logger.warning(f"Using render URL from overlay_layouts (fallback): overlay_id={body.overlay_id}")
         
         if not render_asset_url:
-            logger.error(f"Render URL not found in overlay layout: overlay_id={body.overlay_id}")
+            logger.error(f"Render URL not found: overlay_id={body.overlay_id}, job_variants_id={body.job_variants_id}")
             raise HTTPException(
                 status_code=404,
-                detail=f"Render URL not found in overlay layout"
+                detail=f"Render URL not found in job_variant or overlay layout"
             )
         
         # Step 2: 이미지 로드

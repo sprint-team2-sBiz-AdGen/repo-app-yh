@@ -7,7 +7,7 @@
 # - job 상태 업데이트
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-28
+# updated_at: 2025-11-30
 # author: LEEYH205
 # description: Overlay logic with DB integration
 # version: 1.1.0
@@ -584,6 +584,84 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             db.rollback()
             # DB 저장 실패해도 결과는 반환
             logger.warning(f"Overlay layout DB save failed but continuing: {e}")
+        
+        # Step 4.5: 최종 overlay 이미지를 image_assets에 저장하고 jobs_variants.overlaid_img_asset_id 업데이트
+        overlaid_img_asset_id = None
+        try:
+            # meta에서 asset_id 추출 (이미 save_asset에서 생성됨)
+            asset_id_str = meta.get('asset_id')
+            if asset_id_str:
+                try:
+                    overlaid_img_asset_id = uuid.UUID(asset_id_str)
+                except (ValueError, TypeError):
+                    overlaid_img_asset_id = uuid.uuid4()
+            else:
+                overlaid_img_asset_id = uuid.uuid4()
+            
+            # image_assets에 저장 (이미 존재하면 업데이트)
+            existing_asset = db.execute(
+                text("""
+                    SELECT image_asset_id FROM image_assets
+                    WHERE image_url = :image_url
+                """),
+                {"image_url": result_url}
+            ).first()
+            
+            if existing_asset:
+                overlaid_img_asset_id = existing_asset[0]
+                # image_type을 'overlaid'로 업데이트
+                db.execute(
+                    text("""
+                        UPDATE image_assets
+                        SET image_type = 'overlaid',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE image_asset_id = :image_asset_id
+                    """),
+                    {"image_asset_id": overlaid_img_asset_id}
+                )
+                logger.info(f"Existing image_asset updated to 'overlaid': image_asset_id={overlaid_img_asset_id}")
+            else:
+                # 새로운 image_asset 생성
+                db.execute(
+                    text("""
+                        INSERT INTO image_assets (
+                            image_asset_id, image_type, image_url, width, height,
+                            tenant_id, created_at, updated_at
+                        ) VALUES (
+                            :image_asset_id, 'overlaid', :image_url, :width, :height,
+                            :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        )
+                    """),
+                    {
+                        "image_asset_id": overlaid_img_asset_id,
+                        "image_url": result_url,
+                        "width": meta.get('width'),
+                        "height": meta.get('height'),
+                        "tenant_id": body.tenant_id
+                    }
+                )
+                logger.info(f"New image_asset created for overlay: image_asset_id={overlaid_img_asset_id}, url={result_url}")
+            
+            # jobs_variants.overlaid_img_asset_id 업데이트
+            db.execute(
+                text("""
+                    UPDATE jobs_variants
+                    SET overlaid_img_asset_id = :overlaid_img_asset_id,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_variants_id = :job_variants_id
+                """),
+                {
+                    "overlaid_img_asset_id": overlaid_img_asset_id,
+                    "job_variants_id": job_variants_id
+                }
+            )
+            db.commit()
+            logger.info(f"jobs_variants.overlaid_img_asset_id updated: job_variants_id={job_variants_id}, overlaid_img_asset_id={overlaid_img_asset_id}")
+        except Exception as e:
+            logger.error(f"Failed to save overlaid image to image_assets: {e}", exc_info=True)
+            db.rollback()
+            # 실패해도 계속 진행 (overlay_layouts에는 이미 저장됨)
+            logger.warning(f"Overlaid image asset save failed but continuing: {e}")
         
         # Step 5: Overlay 완료 - job 상태 업데이트 (status='done')
         try:
