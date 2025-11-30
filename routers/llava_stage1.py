@@ -6,10 +6,10 @@
 # - 관련성 점수 계산
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-20
+# updated_at: 2025-11-28
 # author: LEEYH205
 # description: LLaVa Stage 1 validation API
-# version: 1.0.0
+# version: 1.1.0
 # status: production
 # tags: llava, stage1, validation
 # dependencies: fastapi, pydantic, PIL, transformers
@@ -25,7 +25,7 @@ import uuid
 from models import LLaVaStage1In, LLaVaStage1Out
 from utils import abs_from_url
 from services.llava_service import validate_image_and_text
-from database import get_db, ImageAsset, Job, JobInput, VLMTrace
+from database import get_db, ImageAsset, Job, JobInput, VLMTrace, JobVariant
 import logging
 
 logger = logging.getLogger(__name__)
@@ -69,21 +69,40 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         HTTPException 500: LLaVa 모델 로드, 검증, 또는 DB 저장 중 오류 발생
     """
     try:
-        # Step 0: 기존 job 조회 및 업데이트
+        # Step 0: job_variants_id 및 job_id 검증
         try:
+            job_variants_id = uuid.UUID(body.job_variants_id)
             job_id = uuid.UUID(body.job_id)
-        except ValueError:
+        except ValueError as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid job_id format: {body.job_id}"
+                detail=f"Invalid UUID format: {str(e)}"
             )
         
+        # job_variants 조회
+        job_variant = db.query(JobVariant).filter(JobVariant.job_variants_id == job_variants_id).first()
+        if not job_variant:
+            logger.error(f"Job variant not found: job_variants_id={body.job_variants_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Job variant not found: {body.job_variants_id}"
+            )
+        
+        # job 조회 및 검증
         job = db.query(Job).filter(Job.job_id == job_id).first()
         if not job:
             logger.error(f"Job not found: job_id={body.job_id}")
             raise HTTPException(
                 status_code=404,
                 detail=f"Job not found: {body.job_id}"
+            )
+        
+        # job_variant와 job의 job_id 일치 확인
+        if job_variant.job_id != job_id:
+            logger.error(f"Job variant job_id mismatch: job_variant.job_id={job_variant.job_id}, request.job_id={job_id}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Job variant job_id mismatch"
             )
         
         # job의 tenant_id 확인
@@ -94,36 +113,27 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
                 detail=f"Job tenant_id mismatch"
             )
         
-        # job 상태 업데이트: current_step='vlm_analyze', status='running'
+        # job_variants 상태 업데이트: current_step='vlm_analyze', status='running'
         db.execute(
             text("""
-                UPDATE jobs 
+                UPDATE jobs_variants 
                 SET status = 'running', 
                     current_step = 'vlm_analyze',
                     updated_at = CURRENT_TIMESTAMP
-                WHERE job_id = :job_id
+                WHERE job_variants_id = :job_variants_id
             """),
-            {"job_id": job_id}
+            {"job_variants_id": job_variants_id}
         )
         db.flush()
-        logger.info(f"Updated job: {job_id} - status=running, current_step=vlm_analyze")
+        logger.info(f"Updated job_variant: {job_variants_id} - status=running, current_step=vlm_analyze")
         
-        # Step 1: job_inputs에서 이미지와 광고 텍스트 가져오기
-        job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
-        if not job_input:
-            logger.error(f"Job input not found: job_id={job_id}")
-            raise HTTPException(
-                status_code=404,
-                detail=f"Job input not found for job_id: {job_id}"
-            )
-        
-        # job_inputs에서 image_asset_id 가져오기
-        image_asset_id = job_input.img_asset_id
+        # Step 1: jobs_variants에서 이미지 가져오기
+        image_asset_id = job_variant.img_asset_id
         if not image_asset_id:
-            logger.error(f"Image asset ID not found in job_input: job_id={job_id}")
+            logger.error(f"Image asset ID not found in job_variant: job_variants_id={job_variants_id}")
             raise HTTPException(
                 status_code=404,
-                detail=f"Image asset ID not found in job input"
+                detail=f"Image asset ID not found in job variant"
             )
         
         # image_assets에서 이미지 정보 가져오기
@@ -136,10 +146,11 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             )
         
         asset_url = image_asset.image_url
-        logger.info(f"Found image asset from job_input: {image_asset_id}, URL: {asset_url}")
+        logger.info(f"Found image asset from job_variant: {image_asset_id}, URL: {asset_url}")
         
         # job_inputs에서 광고 텍스트 가져오기 (요청에 없으면)
-        ad_copy_text = body.ad_copy_text if body.ad_copy_text else job_input.desc_eng
+        job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
+        ad_copy_text = body.ad_copy_text if body.ad_copy_text else (job_input.desc_eng if job_input else None)
         if not ad_copy_text:
             logger.warning(f"Ad copy text not found in request or job_input: job_id={job_id}")
         
@@ -199,6 +210,20 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             logger.info(f"Validation completed: is_valid={result.get('is_valid')}, score={result.get('relevance_score')}, latency={latency_ms:.2f}ms")
         except Exception as e:
             logger.error(f"LLaVa validation failed: {str(e)}", exc_info=True)
+            # job_variants 상태를 'failed'로 업데이트
+            try:
+                db.execute(
+                    text("""
+                        UPDATE jobs_variants 
+                        SET status = 'failed', 
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = :job_variants_id
+                    """),
+                    {"job_variants_id": job_variants_id}
+                )
+                db.commit()
+            except Exception as update_error:
+                logger.error(f"Failed to update job_variant status to failed: {update_error}")
             db.rollback()
             raise HTTPException(
                 status_code=500,
@@ -242,13 +267,16 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             }
         )
         
-        # Step 8: jobs 상태를 'done'으로 업데이트
+        # Step 8: jobs_variants 상태를 'done'으로 업데이트
         db.execute(
             text("""
-                UPDATE jobs SET status = 'done', updated_at = CURRENT_TIMESTAMP
-                WHERE job_id = :job_id
+                UPDATE jobs_variants 
+                SET status = 'done', 
+                    current_step = 'vlm_analyze',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_variants_id = :job_variants_id
             """),
-            {"job_id": job_id}
+            {"job_variants_id": job_variants_id}
         )
         
         # Step 9: 커밋
@@ -290,9 +318,23 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         # HTTPException은 그대로 재발생
         raise
     except Exception as e:
-        # 예상치 못한 오류
+        # 예상치 못한 오류 - job_variants 상태를 'failed'로 업데이트
         logger.error(f"Unexpected error in stage1_validate: {str(e)}", exc_info=True)
         if db:
+            try:
+                if 'job_variants_id' in locals():
+                    db.execute(
+                        text("""
+                            UPDATE jobs_variants 
+                            SET status = 'failed', 
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE job_variants_id = :job_variants_id
+                        """),
+                        {"job_variants_id": job_variants_id}
+                    )
+                    db.commit()
+            except Exception as update_error:
+                logger.error(f"Failed to update job_variant status to failed: {update_error}")
             db.rollback()
         raise HTTPException(
             status_code=500,

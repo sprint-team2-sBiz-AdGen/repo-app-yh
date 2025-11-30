@@ -7,10 +7,10 @@
 # - job 상태 업데이트
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-24
+# updated_at: 2025-11-28
 # author: LEEYH205
 # description: YOLO detection logic with DB integration
-# version: 1.0.0
+# version: 1.1.0
 # status: production
 # tags: yolo, detection
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -29,7 +29,7 @@ from sqlalchemy import text
 from models import DetectIn, DetectOut
 from utils import abs_from_url, save_asset
 from services.yolo_service import detect_forbidden_areas
-from database import get_db, Job, JobInput, ImageAsset, Detection, YOLORun
+from database import get_db, Job, JobInput, ImageAsset, Detection, YOLORun, JobVariant
 import logging
 
 logger = logging.getLogger(__name__)
@@ -72,21 +72,40 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
         HTTPException 500: YOLO 모델 로드, 감지, 또는 DB 저장 중 오류 발생
     """
     try:
-        # Step 0: 기존 job 조회 및 업데이트
+        # Step 0: job_variants_id 및 job_id 검증
         try:
+            job_variants_id = uuid.UUID(body.job_variants_id)
             job_id = uuid.UUID(body.job_id)
-        except ValueError:
+        except ValueError as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid job_id format: {body.job_id}"
+                detail=f"Invalid UUID format: {str(e)}"
             )
         
+        # job_variants 조회
+        job_variant = db.query(JobVariant).filter(JobVariant.job_variants_id == job_variants_id).first()
+        if not job_variant:
+            logger.error(f"Job variant not found: job_variants_id={body.job_variants_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Job variant not found: {body.job_variants_id}"
+            )
+        
+        # job 조회 및 검증
         job = db.query(Job).filter(Job.job_id == job_id).first()
         if not job:
             logger.error(f"Job not found: job_id={body.job_id}")
             raise HTTPException(
                 status_code=404,
                 detail=f"Job not found: {body.job_id}"
+            )
+        
+        # job_variant와 job의 job_id 일치 확인
+        if job_variant.job_id != job_id:
+            logger.error(f"Job variant job_id mismatch: job_variant.job_id={job_variant.job_id}, request.job_id={job_id}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Job variant job_id mismatch"
             )
         
         # job의 tenant_id 확인
@@ -97,40 +116,32 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
                 detail=f"Job tenant_id mismatch"
             )
         
-        # job 상태 업데이트: current_step='yolo_detect', status='running'
+        # job_variants 상태 업데이트: current_step='yolo_detect', status='running'
         db.execute(
             text("""
-                UPDATE jobs 
+                UPDATE jobs_variants 
                 SET status = 'running', 
                     current_step = 'yolo_detect',
                     updated_at = CURRENT_TIMESTAMP
-                WHERE job_id = :job_id
+                WHERE job_variants_id = :job_variants_id
             """),
-            {"job_id": job_id}
+            {"job_variants_id": job_variants_id}
         )
         db.flush()
-        logger.info(f"Updated job: {job_id} - status=running, current_step=yolo_detect")
+        logger.info(f"Updated job_variant: {job_variants_id} - status=running, current_step=yolo_detect")
         
-        # Step 1: job_inputs에서 이미지 정보 가져오기
+        # Step 1: jobs_variants에서 이미지 정보 가져오기
         asset_url = body.asset_url
         image_asset_id = None
         
         if not asset_url:
-            job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
-            if not job_input:
-                logger.error(f"Job input not found: job_id={job_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Job input not found for job_id: {job_id}"
-                )
-            
-            # job_inputs에서 image_asset_id 가져오기
-            image_asset_id = job_input.img_asset_id
+            # jobs_variants에서 image_asset_id 가져오기
+            image_asset_id = job_variant.img_asset_id
             if not image_asset_id:
-                logger.error(f"Image asset ID not found in job_input: job_id={job_id}")
+                logger.error(f"Image asset ID not found in job_variant: job_variants_id={job_variants_id}")
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Image asset ID not found in job input"
+                    detail=f"Image asset ID not found in job variant"
                 )
             
             # image_assets에서 이미지 정보 가져오기
@@ -143,7 +154,7 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
                 )
             
             asset_url = image_asset.image_url
-            logger.info(f"Found image asset from job_input: {image_asset_id}, URL: {asset_url}")
+            logger.info(f"Found image asset from job_variant: {image_asset_id}, URL: {asset_url}")
         else:
             # asset_url이 제공된 경우, image_asset_id를 조회
             image_asset = db.query(ImageAsset).filter(ImageAsset.image_url == asset_url).first()
@@ -290,13 +301,16 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
             db.flush()
             logger.info(f"Saved yolo_run to DB: yolo_run_id={yolo_run_id}, job_id={job_id}, latency_ms={latency_ms:.2f}")
         
-        # Step 6: jobs 상태를 'done'으로 업데이트
+        # Step 6: jobs_variants 상태를 'done'으로 업데이트
         db.execute(
             text("""
-                UPDATE jobs SET status = 'done', updated_at = CURRENT_TIMESTAMP
-                WHERE job_id = :job_id
+                UPDATE jobs_variants 
+                SET status = 'done', 
+                    current_step = 'yolo_detect',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_variants_id = :job_variants_id
             """),
-            {"job_id": job_id}
+            {"job_variants_id": job_variants_id}
         )
         
         # Step 7: 커밋
@@ -331,9 +345,23 @@ def detect(body: DetectIn, db: Session = Depends(get_db)):
         # HTTPException은 그대로 재발생
         raise
     except Exception as e:
-        # 예상치 못한 오류
+        # 예상치 못한 오류 - job_variants 상태를 'failed'로 업데이트
         logger.error(f"Unexpected error in detect: {str(e)}", exc_info=True)
         if db:
+            try:
+                if 'job_variants_id' in locals():
+                    db.execute(
+                        text("""
+                            UPDATE jobs_variants 
+                            SET status = 'failed', 
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE job_variants_id = :job_variants_id
+                        """),
+                        {"job_variants_id": job_variants_id}
+                    )
+                    db.commit()
+            except Exception as update_error:
+                logger.error(f"Failed to update job_variant status to failed: {update_error}")
             db.rollback()
         raise HTTPException(
             status_code=500,
