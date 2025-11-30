@@ -169,6 +169,73 @@ async def trigger_next_pipeline_stage(
             exc_info=True
         )
 
+
+async def retry_pipeline_stage(
+    job_id: str,
+    current_step: str,
+    tenant_id: str,
+):
+    """현재 단계 재실행 (Job이 failed인 경우 재시도 용도)
+    
+    PIPELINE_STAGES에서 next_step이 current_step인 항목을 찾아
+    해당 단계의 API를 다시 호출한다.
+    """
+    if not current_step:
+        logger.debug(f"[RETRY] current_step 누락으로 재시도 스킵: job_id={job_id}")
+        return
+    
+    # current_step을 next_step으로 사용하는 stage_info 찾기
+    stage_info = None
+    for (_step, _status), info in PIPELINE_STAGES.items():
+        if info.get("next_step") == current_step:
+            stage_info = info
+            break
+    
+    if not stage_info:
+        logger.debug(
+            f"[RETRY] 재시도 가능한 단계 정보 없음: job_id={job_id}, current_step={current_step}"
+        )
+        return
+    
+    api_url = f"http://{HOST}:{PORT}{stage_info['api_endpoint']}"
+    request_data = {
+        "job_id": job_id,
+        "tenant_id": tenant_id,
+    }
+    
+    # overlay_id 등이 필요한 단계는 재시도 대상에서 제외 (vlm_analyze, yolo_detect 중심)
+    if stage_info.get("needs_overlay_id") or stage_info.get("needs_text_and_proposal"):
+        logger.warning(
+            f"[RETRY] overlay_id/text가 필요한 단계는 재시도 스킵: "
+            f"job_id={job_id}, current_step={current_step}, api={api_url}"
+        )
+        return
+    
+    logger.info(
+        f"[RETRY] 파이프라인 단계 재시도: job_id={job_id}, "
+        f"current_step={current_step}, api={api_url}"
+    )
+    
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            response = await client.post(api_url, json=request_data)
+            response.raise_for_status()
+            logger.info(
+                f"[RETRY] 파이프라인 단계 재실행 성공: job_id={job_id}, "
+                f"current_step={current_step}"
+            )
+    except httpx.HTTPError as e:
+        logger.error(
+            f"[RETRY] 파이프라인 단계 재실행 실패: job_id={job_id}, "
+            f"current_step={current_step}, error={e}"
+        )
+    except Exception as e:
+        logger.error(
+            f"[RETRY] 파이프라인 단계 재실행 중 예상치 못한 오류: job_id={job_id}, "
+            f"current_step={current_step}, error={e}",
+            exc_info=True,
+        )
+
 async def _verify_job_state(
     job_id: str,
     expected_step: str,

@@ -25,6 +25,9 @@ from config import DATABASE_URL, JOB_STATE_LISTENER_RECONNECT_DELAY
 
 logger = logging.getLogger(__name__)
 
+# 최대 재시도 횟수 (Job 단위)
+MAX_JOB_RETRY_COUNT = 3
+
 class JobStateListener:
     """PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너"""
     
@@ -219,7 +222,126 @@ class JobStateListener:
                 'iou_eval': 8
             }
             
-            # Job이 running 또는 failed 상태이고 yh 파트 단계인 경우 뒤처진 variants 확인
+            # 1) Job이 failed인 경우: 재시도 가능하면 현재 단계 재실행
+            if status == 'failed' and current_step and current_step in YH_STEPS:
+                from services.pipeline_trigger import retry_pipeline_stage
+                
+                # Job/Variants 상태 확인 및 최대 재시도 횟수 체크
+                asyncpg_url = DATABASE_URL.replace("postgresql://", "postgres://")
+                conn: Optional[asyncpg.Connection] = None
+                try:
+                    conn = await asyncpg.connect(asyncpg_url)
+                    
+                    row = await conn.fetchrow(
+                        """
+                        SELECT 
+                            j.retry_count,
+                            COUNT(jv.job_variants_id) AS total_variants,
+                            COUNT(*) FILTER (
+                                WHERE jv.status = 'failed' 
+                                  AND jv.current_step = $2
+                            ) AS failed_at_step,
+                            COUNT(*) FILTER (
+                                WHERE jv.status IN ('running', 'queued')
+                            ) AS running_or_queued
+                        FROM jobs j
+                        LEFT JOIN jobs_variants jv 
+                            ON j.job_id = jv.job_id
+                        WHERE j.job_id = $1
+                        GROUP BY j.retry_count
+                        """,
+                        uuid.UUID(job_id),
+                        current_step,
+                    )
+                    
+                    if row:
+                        retry_count = row["retry_count"] or 0
+                        total_variants = row["total_variants"] or 0
+                        failed_at_step = row["failed_at_step"] or 0
+                        running_or_queued = row["running_or_queued"] or 0
+                    else:
+                        retry_count = 0
+                        total_variants = 0
+                        failed_at_step = 0
+                        running_or_queued = 0
+                    
+                    # 재시도 조건:
+                    # - 최대 재시도 횟수 미만
+                    # - 모든 variants가 동일 단계에서 failed
+                    # - 진행 중인 variants 없음
+                    can_retry = (
+                        total_variants > 0
+                        and failed_at_step == total_variants
+                        and running_or_queued == 0
+                        and retry_count < MAX_JOB_RETRY_COUNT
+                    )
+                    
+                    if can_retry:
+                        new_retry_count = retry_count + 1
+                        
+                        # Job을 running으로 되돌리고 retry_count 증가
+                        await conn.execute(
+                            """
+                            UPDATE jobs
+                            SET status = 'running',
+                                retry_count = retry_count + 1,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE job_id = $1
+                              AND status = 'failed'
+                              AND current_step = $2
+                            """,
+                            uuid.UUID(job_id),
+                            current_step,
+                        )
+                        
+                        # 해당 단계에서 failed인 variants의 retry_count 증가
+                        await conn.execute(
+                            """
+                            UPDATE jobs_variants
+                            SET retry_count = retry_count + 1,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE job_id = $1
+                              AND current_step = $2
+                              AND status = 'failed'
+                            """,
+                            uuid.UUID(job_id),
+                            current_step,
+                        )
+                        
+                        logger.warning(
+                            f"⚠️ Job 실패 재시도: job_id={job_id}, "
+                            f"current_step={current_step}, "
+                            f"retry_count={new_retry_count}/{MAX_JOB_RETRY_COUNT}, "
+                            f"variants={total_variants}"
+                        )
+                        
+                        # 현재 단계 다시 실행 (동일 API 재호출)
+                        await retry_pipeline_stage(
+                            job_id=job_id,
+                            current_step=current_step,
+                            tenant_id=tenant_id,
+                        )
+                        
+                        # 재시도 스케줄 후에는 뒤처진 variant 복구 및 다음 단계 트리거는 건너뜀
+                        return
+                    else:
+                        if retry_count >= MAX_JOB_RETRY_COUNT:
+                            logger.warning(
+                                f"최대 재시도 횟수 초과로 Job 재시도 스킵: "
+                                f"job_id={job_id}, current_step={current_step}, "
+                                f"retry_count={retry_count}"
+                            )
+                except Exception as retry_error:
+                    logger.error(
+                        f"Job 실패 재시도 로직 실행 중 오류: job_id={job_id}, "
+                        f"current_step={current_step}, error={retry_error}",
+                        exc_info=True,
+                    )
+                finally:
+                    if conn:
+                        await conn.close()
+            
+            # 2) Job이 running 또는 failed 상태이고 yh 파트 단계인 경우 뒤처진 variants 확인
             # (failed 상태도 확인하여 실패한 variants를 재시도)
             if status in ['running', 'failed'] and current_step and current_step in YH_STEPS:
                 await self._recover_stuck_variants(job_id, current_step, tenant_id, STEP_ORDER)
@@ -319,9 +441,24 @@ class JobStateListener:
                         # Variant가 done 상태이면 다음 단계 트리거
                         if variant_status == 'done':
                             try:
+                                # retry_count 증가
+                                await conn.execute("""
+                                    UPDATE jobs_variants
+                                    SET retry_count = retry_count + 1,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    WHERE job_variants_id = $1
+                                """, variant_id)
+                                
+                                # 현재 retry_count 조회
+                                current_retry = await conn.fetchval("""
+                                    SELECT retry_count
+                                    FROM jobs_variants
+                                    WHERE job_variants_id = $1
+                                """, variant_id)
+                                
                                 logger.info(
                                     f"뒤처진 variant 재시작 시도: job_variants_id={variant_id}, "
-                                    f"current_step={variant_step} → 다음 단계"
+                                    f"current_step={variant_step} → 다음 단계, retry_count={current_retry}"
                                 )
                                 
                                 await trigger_next_pipeline_stage_for_variant(
@@ -366,19 +503,27 @@ class JobStateListener:
                         # Variant가 failed 상태이면 재시도 (다음 단계로 진행 시도)
                         elif variant_status == 'failed':
                             try:
-                                logger.info(
-                                    f"실패한 variant 재시도: job_variants_id={variant_id}, "
-                                    f"current_step={variant_step}"
-                                )
-                                
-                                # failed 상태를 done으로 변경하여 다음 단계로 진행 시도
+                                # retry_count 증가 및 failed 상태를 done으로 변경
                                 # (실패한 단계를 건너뛰고 다음 단계로 진행)
                                 await conn.execute("""
                                     UPDATE jobs_variants
                                     SET status = 'done',
+                                        retry_count = retry_count + 1,
                                         updated_at = CURRENT_TIMESTAMP
                                     WHERE job_variants_id = $1
                                 """, variant_id)
+                                
+                                # 현재 retry_count 조회
+                                current_retry = await conn.fetchval("""
+                                    SELECT retry_count
+                                    FROM jobs_variants
+                                    WHERE job_variants_id = $1
+                                """, variant_id)
+                                
+                                logger.info(
+                                    f"실패한 variant 재시도: job_variants_id={variant_id}, "
+                                    f"current_step={variant_step}, retry_count={current_retry}"
+                                )
                                 
                                 # 다음 단계 트리거
                                 await trigger_next_pipeline_stage_for_variant(
@@ -510,14 +655,25 @@ class JobStateListener:
                                 f"updated_at={stuck['updated_at']}"
                             )
                             
-                            # 상태를 다시 업데이트하여 트리거 발동
+                            # retry_count 증가 및 상태를 다시 업데이트하여 트리거 발동
                             await conn.execute("""
                                 UPDATE jobs_variants
-                                SET updated_at = CURRENT_TIMESTAMP
+                                SET retry_count = retry_count + 1,
+                                    updated_at = CURRENT_TIMESTAMP
                                 WHERE job_variants_id = $1
                             """, uuid.UUID(stuck_id))
                             
-                            logger.info(f"멈춘 variant 재시도: job_variants_id={stuck_id}, current_step={stuck_step}")
+                            # 현재 retry_count 조회
+                            current_retry = await conn.fetchval("""
+                                SELECT retry_count
+                                FROM jobs_variants
+                                WHERE job_variants_id = $1
+                            """, uuid.UUID(stuck_id))
+                            
+                            logger.info(
+                                f"멈춘 variant 재시도: job_variants_id={stuck_id}, "
+                                f"current_step={stuck_step}, retry_count={current_retry}"
+                            )
                     finally:
                         await conn.close()
                 except Exception as retry_error:
@@ -598,22 +754,30 @@ class JobStateListener:
                         iou_done = job['iou_done_count']
                         
                         try:
-                            # Job을 done으로 업데이트
+                            # Job을 done으로 업데이트 (수동 복구이므로 retry_count 증가)
                             result = await conn.execute("""
                                 UPDATE jobs
                                 SET status = 'done',
                                     current_step = 'iou_eval',
+                                    retry_count = retry_count + 1,
                                     updated_at = CURRENT_TIMESTAMP
                                 WHERE job_id = $1
                                   AND status = 'running'
                                   AND current_step = 'iou_eval'
                             """, job_id)
                             
+                            # 현재 retry_count 조회
+                            current_retry = await conn.fetchval("""
+                                SELECT retry_count
+                                FROM jobs
+                                WHERE job_id = $1
+                            """, job_id)
+                            
                             if result == "UPDATE 1":
                                 fixed_count += 1
                                 logger.info(
                                     f"✅ 수동 복구 완료: job_id={job_id}, "
-                                    f"variants: {iou_done}/{total} 모두 iou_eval, done"
+                                    f"variants: {iou_done}/{total} 모두 iou_eval, done, retry_count={current_retry}"
                                 )
                             else:
                                 logger.debug(
