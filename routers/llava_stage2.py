@@ -9,7 +9,7 @@
 # - job 상태 업데이트
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-28
+# updated_at: 2025-11-30
 # author: LEEYH205
 # description: LLaVa Stage 2 validation API
 # version: 1.1.0
@@ -30,7 +30,7 @@ import time
 from models import JudgeIn, JudgeOut
 from utils import abs_from_url
 from services.llava_service import judge_final_ad
-from database import get_db, Job, OverlayLayout, VLMTrace, JobVariant
+from database import get_db, Job, OverlayLayout, VLMTrace, JobVariant, ImageAsset
 import logging
 
 logger = logging.getLogger(__name__)
@@ -137,12 +137,22 @@ def judge(body: JudgeIn, db: Session = Depends(get_db)):
         # Step 1: render_asset_url 가져오기
         render_asset_url = body.render_asset_url
         if not render_asset_url:
-            # overlay_id로부터 render_asset_url 조회
+            # 우선순위 1: job_variant에서 overlaid_img_asset_id 조회
+            if job_variant.overlaid_img_asset_id:
+                overlaid_asset = db.query(ImageAsset).filter(
+                    ImageAsset.image_asset_id == job_variant.overlaid_img_asset_id
+                ).first()
+                if overlaid_asset:
+                    render_asset_url = overlaid_asset.image_url
+                    logger.info(f"Found overlaid image from jobs_variants: image_asset_id={job_variant.overlaid_img_asset_id}, url={render_asset_url}")
+        
+        if not render_asset_url:
+            # 우선순위 2: overlay_id로부터 render_asset_url 조회 (하위 호환성)
             if not body.overlay_id:
-                logger.error(f"render_asset_url 또는 overlay_id가 필요합니다: job_id={job_id}")
+                logger.error(f"render_asset_url, job_variant.overlaid_img_asset_id, 또는 overlay_id가 필요합니다: job_id={job_id}")
                 raise HTTPException(
                     status_code=400,
-                    detail=f"render_asset_url 또는 overlay_id가 필요합니다"
+                    detail=f"render_asset_url, job_variant.overlaid_img_asset_id, 또는 overlay_id가 필요합니다"
                 )
             
             try:
@@ -161,7 +171,7 @@ def judge(body: JudgeIn, db: Session = Depends(get_db)):
                     detail=f"Overlay layout not found: {body.overlay_id}"
                 )
             
-            # overlay.layout에서 render 정보 가져오기
+            # overlay.layout에서 render 정보 가져오기 (fallback)
             layout = overlay.layout if isinstance(overlay.layout, dict) else json.loads(overlay.layout) if isinstance(overlay.layout, str) else {}
             render = layout.get('render', {})
             render_asset_url = render.get('url')
@@ -173,7 +183,7 @@ def judge(body: JudgeIn, db: Session = Depends(get_db)):
                     detail=f"Render URL not found in overlay layout"
                 )
             
-            logger.info(f"Found render URL from overlay: overlay_id={body.overlay_id}, URL: {render_asset_url}")
+            logger.warning(f"Using render URL from overlay_layouts (fallback): overlay_id={body.overlay_id}, URL: {render_asset_url}")
         
         # Step 2: 이미지 로드
         try:
