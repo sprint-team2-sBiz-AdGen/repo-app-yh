@@ -165,6 +165,12 @@ def eng_to_kor(body: EngToKorIn, db: Session = Depends(get_db)):
             token_usage = result.get("token_usage")
             gpt_response_raw = result.get("gpt_response_raw")
             prompt_used = result.get("prompt_used")
+            
+            # 토큰 정보 확인 및 로깅
+            if token_usage:
+                logger.info(f"✓ 토큰 정보 수신: prompt_tokens={token_usage.get('prompt_tokens')}, completion_tokens={token_usage.get('completion_tokens')}, total_tokens={token_usage.get('total_tokens')}")
+            else:
+                logger.warning(f"⚠️ translate_eng_to_kor에서 token_usage가 None입니다. result={result.keys()}")
         except Exception as e:
             logger.error(f"GPT translation failed: {str(e)}", exc_info=True)
             # jobs 테이블 상태를 'failed'로 업데이트

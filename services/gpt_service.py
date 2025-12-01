@@ -6,16 +6,16 @@
 # - 인스타그램 피드 글 생성
 # - 해시태그 생성
 ########################################################
-# created_at: 2025-01-XX
-# updated_at: 2025-01-XX
+# created_at: 2025-11-26
+# updated_at: 2025-12-01
 # author: LEEYH205
-# description: GPT service for text generation
-# version: 0.1.0
-# status: development
-# tags: gpt, service
+# description: GPT service for text generation and translation
+# version: 1.1.0
+# status: production
+# tags: gpt, service, translation
 # dependencies: openai, fastapi
 # license: MIT
-# copyright: 2025 FeedlyAI
+# copyright: 2025 FeedlyAI Team
 ########################################################
 
 import os
@@ -287,14 +287,31 @@ Please provide only the Korean translation, maintaining the original tone and st
         # 프롬프트 구성 (디버깅용)
         prompt_used = f"System: {system_prompt}\n\nUser: {user_prompt}"
         
-        # 토큰 사용량 추출
+        # 토큰 사용량 추출 (feed_gen과 동일한 방식)
         token_usage = None
-        if hasattr(response, 'usage') and response.usage:
-            token_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens
-            }
+        try:
+            # response.usage 확인
+            if hasattr(response, 'usage'):
+                usage_obj = response.usage
+                if usage_obj is not None:
+                    # usage 객체의 속성 확인
+                    if hasattr(usage_obj, 'prompt_tokens') and hasattr(usage_obj, 'completion_tokens') and hasattr(usage_obj, 'total_tokens'):
+                        token_usage = {
+                            "prompt_tokens": usage_obj.prompt_tokens,
+                            "completion_tokens": usage_obj.completion_tokens,
+                            "total_tokens": usage_obj.total_tokens
+                        }
+                        logger.info(f"✓ 토큰 사용량 추출 성공: prompt={token_usage['prompt_tokens']}, completion={token_usage['completion_tokens']}, total={token_usage['total_tokens']}")
+                    else:
+                        logger.warning(f"⚠️ usage 객체에 필요한 속성이 없습니다. usage_obj={usage_obj}, dir={dir(usage_obj)}")
+                else:
+                    logger.warning(f"⚠️ response.usage가 None입니다.")
+            else:
+                logger.warning(f"⚠️ response에 usage 속성이 없습니다. response 타입={type(response)}, dir={[x for x in dir(response) if not x.startswith('_')]}")
+        except Exception as e:
+            logger.error(f"❌ 토큰 사용량 추출 중 오류: {e}", exc_info=True)
+            import traceback
+            logger.error(f"트레이스백: {traceback.format_exc()}")
         
         # GPT API 원본 응답 (JSONB 형식으로 저장 가능하도록 dict로 변환)
         gpt_response_raw = None
