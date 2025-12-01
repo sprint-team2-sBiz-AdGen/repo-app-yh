@@ -10,7 +10,7 @@
 # updated_at: 2025-12-01
 # author: LEEYH205
 # description: YE 파트 파이프라인 테스트용 Background Job Creator
-# version: 1.1.0
+# version: 1.2.0
 ########################################################
 
 import sys
@@ -87,9 +87,9 @@ def create_ye_job_with_variants(
         else:
             logger.info(f"⚠ Store 없음 (NULL 사용)")
         
-        # 3. 이미지 파일 찾기
+        # 3. 이미지 파일 찾기 (하나의 이미지만 사용, 모든 variants가 같은 이미지 사용)
         if image_paths:
-            # 사용자가 지정한 이미지 경로 사용
+            # 사용자가 지정한 이미지 경로 사용 (첫 번째 이미지만)
             available_images = [Path(p) for p in image_paths if os.path.exists(p)]
         else:
             # 기본 이미지 경로들 시도
@@ -108,14 +108,10 @@ def create_ye_job_with_variants(
                 f"기본 경로: {project_root / 'pipeline_test'}"
             )
         
-        # variants_count개가 안 되면 첫 번째 이미지를 반복 사용
-        selected_images = []
-        for i in range(variants_count):
-            selected_images.append(available_images[i % len(available_images)])
-        
-        logger.info(f"✓ {len(selected_images)}개 이미지 선택 완료")
-        for i, img_path in enumerate(selected_images, 1):
-            logger.info(f"  - Variant {i}: {img_path.name}")
+        # 첫 번째 이미지만 사용 (모든 variants가 같은 이미지 사용)
+        selected_image = available_images[0]
+        logger.info(f"✓ 이미지 선택 완료: {selected_image.name}")
+        logger.info(f"  - 모든 variants가 같은 이미지를 사용합니다")
         
         # 4. Job 생성 (user_img_input 완료 상태로 시작)
         job_id = uuid.uuid4()
@@ -138,7 +134,46 @@ def create_ye_job_with_variants(
         logger.info(f"✓ Job 생성: job_id={job_id}")
         logger.info(f"  - status=done, current_step=user_img_input")
         
-        # 5. Job Input 생성 (선택적, 기본값)
+        # 5. 이미지 로드 및 image_asset 생성 (하나의 이미지만 사용)
+        logger.info(f"\n[이미지 준비] 이미지 로드 및 저장 중...")
+        image = Image.open(selected_image)
+        asset_meta = save_asset(tenant_id, "ye_pipeline_test", image, ".jpg")
+        asset_url = asset_meta["url"]
+        
+        # image_assets 확인/생성 (하나의 image_asset_id만 생성)
+        existing = db.execute(
+            text("SELECT image_asset_id FROM image_assets WHERE image_url = :url AND tenant_id = :tenant_id"),
+            {"url": asset_url, "tenant_id": tenant_id}
+        ).first()
+        
+        if existing:
+            image_asset_id = existing[0]
+            logger.info(f"  - 기존 image_asset 사용: {image_asset_id}")
+        else:
+            image_asset_id = uuid.uuid4()
+            db.execute(text("""
+                INSERT INTO image_assets (
+                    image_asset_id, image_type, image_url, width, height,
+                    tenant_id, created_at, updated_at
+                ) VALUES (
+                    :image_asset_id, 'generated', :asset_url, :width, :height,
+                    :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+            """), {
+                "image_asset_id": image_asset_id,
+                "asset_url": asset_url,
+                "width": image.size[0],
+                "height": image.size[1],
+                "tenant_id": tenant_id
+            })
+            db.commit()
+            logger.info(f"  - 새 image_asset 생성: {image_asset_id}")
+        
+        logger.info(f"✓ 이미지 준비 완료: {selected_image.name}")
+        logger.info(f"  - image_asset_id: {image_asset_id}")
+        logger.info(f"  - asset_url: {asset_url}")
+        
+        # 6. Job Input 생성 (선택적, 기본값)
         tone_style_row = db.execute(text("""
             SELECT tone_style_id
             FROM tone_styles
@@ -159,53 +194,19 @@ def create_ye_job_with_variants(
             SET updated_at = CURRENT_TIMESTAMP
         """), {
             "job_id": job_id,
-            "img_asset_id": None,  # 첫 번째 variant의 이미지 사용 가능
+            "img_asset_id": image_asset_id,  # 모든 variants와 같은 image_asset_id 사용
             "tone_style_id": tone_style_id,
             "desc_kor": "YE 파트 테스트용 이미지"
         })
         db.commit()
-        logger.info(f"✓ Job Input 생성 완료")
+        logger.info(f"✓ Job Input 생성 완료 (img_asset_id: {image_asset_id})")
         
-        # 6. Job Variants N개 생성 (user_img_input 완료 상태)
+        # 7. Job Variants N개 생성 (user_img_input 완료 상태, 모두 같은 img_asset_id 사용)
         job_variants = []
-        for i, img_path in enumerate(selected_images, 1):
+        for i in range(1, variants_count + 1):
             logger.info(f"\n[Variant {i}/{variants_count}] 생성 중...")
             
-            # 이미지 로드 및 저장
-            image = Image.open(img_path)
-            asset_meta = save_asset(tenant_id, f"ye_variant_{i}", image, ".jpg")
-            asset_url = asset_meta["url"]
-            
-            # image_assets 확인/생성
-            existing = db.execute(
-                text("SELECT image_asset_id FROM image_assets WHERE image_url = :url AND tenant_id = :tenant_id"),
-                {"url": asset_url, "tenant_id": tenant_id}
-            ).first()
-            
-            if existing:
-                image_asset_id = existing[0]
-                logger.info(f"  - 기존 image_asset 사용: {image_asset_id}")
-            else:
-                image_asset_id = uuid.uuid4()
-                db.execute(text("""
-                    INSERT INTO image_assets (
-                        image_asset_id, image_type, image_url, width, height,
-                        tenant_id, created_at, updated_at
-                    ) VALUES (
-                        :image_asset_id, 'generated', :asset_url, :width, :height,
-                        :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                    )
-                """), {
-                    "image_asset_id": image_asset_id,
-                    "asset_url": asset_url,
-                    "width": image.size[0],
-                    "height": image.size[1],
-                    "tenant_id": tenant_id
-                })
-                db.commit()
-                logger.info(f"  - 새 image_asset 생성: {image_asset_id}")
-            
-            # Job Variant 생성 (user_img_input 완료 상태)
+            # Job Variant 생성 (user_img_input 완료 상태, 모든 variants가 같은 img_asset_id 사용)
             job_variants_id = uuid.uuid4()
             db.execute(text("""
                 INSERT INTO jobs_variants (
@@ -218,7 +219,7 @@ def create_ye_job_with_variants(
             """), {
                 "job_variants_id": job_variants_id,
                 "job_id": job_id,
-                "img_asset_id": image_asset_id,
+                "img_asset_id": image_asset_id,  # 모든 variants가 같은 image_asset_id 사용
                 "creation_order": i,
                 "status": "done",  # user_img_input 완료 상태
                 "current_step": "user_img_input"  # user_img_input 완료 상태
@@ -234,7 +235,7 @@ def create_ye_job_with_variants(
             })
             logger.info(f"✓ Variant {i} 생성 완료:")
             logger.info(f"  - job_variants_id: {job_variants_id}")
-            logger.info(f"  - img_asset_id: {image_asset_id}")
+            logger.info(f"  - img_asset_id: {image_asset_id} (모든 variants와 동일)")
             logger.info(f"  - status=done, current_step=user_img_input")
         
         logger.info(f"\n✓ 총 {len(job_variants)}개 Variant 생성 완료")

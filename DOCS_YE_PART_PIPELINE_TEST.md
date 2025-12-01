@@ -5,7 +5,7 @@
 이 문서는 YE 파트(이미지 생성) 파이프라인을 테스트하기 위한 Background Job Creator 사용 가이드입니다.
 
 **작성일**: 2025-12-01  
-**버전**: 1.1.0  
+**버전**: 1.2.0  
 **작성자**: LEEYH205
 
 ---
@@ -118,8 +118,8 @@ docker exec feedlyai-work-yh python3 scripts/background_ye_pipeline_test.py \
 ```
 
 **설명**:
-- 지정한 이미지 파일들을 사용
-- Variants 개수만큼 순환 사용 (3개면 첫 번째 이미지 재사용)
+- 지정한 이미지 파일 중 **첫 번째 이미지만 사용**
+- **모든 variants가 같은 이미지와 같은 `img_asset_id`를 사용**
 
 ### 예제 3: Variants 개수 변경
 
@@ -131,7 +131,7 @@ docker exec feedlyai-work-yh python3 scripts/background_ye_pipeline_test.py \
 
 **설명**:
 - 5개의 Variants 생성
-- 이미지가 부족하면 첫 번째 이미지를 반복 사용
+- **모든 variants가 같은 이미지와 같은 `img_asset_id`를 사용**
 
 ### 예제 4: 백그라운드 실행 (완료 대기)
 
@@ -225,6 +225,8 @@ INSERT INTO job_inputs (
 )
 ```
 
+**중요**: `img_asset_id`는 모든 variants와 동일한 `image_asset_id`를 사용합니다.
+
 ### 3. Image Assets 테이블
 
 ```sql
@@ -235,7 +237,11 @@ INSERT INTO image_assets (
 )
 ```
 
-**이미지 소스**: `pipeline_test/` 디렉토리의 기존 이미지 파일
+**이미지 소스**: `pipeline_test/` 디렉토리의 기존 이미지 파일 (첫 번째 이미지만 사용)
+
+**중요**: 
+- **하나의 이미지만 로드**하고 **하나의 `image_asset_id`만 생성**합니다.
+- 모든 variants와 `job_inputs`가 이 동일한 `image_asset_id`를 참조합니다.
 
 ### 4. Job Variants 테이블
 
@@ -249,6 +255,10 @@ INSERT INTO jobs_variants (
 ```
 
 **Variants 개수**: 기본 3개 (옵션으로 변경 가능)
+
+**중요**: 
+- **모든 variants가 동일한 `img_asset_id`를 사용**합니다.
+- 각 variant는 같은 이미지를 참조하지만, `creation_order`로 구분됩니다.
 
 ---
 
@@ -269,7 +279,7 @@ pipeline_test/
 
 **동작**:
 - 위 순서대로 이미지 파일을 찾음
-- Variants 개수만큼 필요하면 첫 번째 이미지를 반복 사용
+- **첫 번째로 찾은 이미지만 사용** (모든 variants가 같은 이미지 사용)
 - `--image-paths` 옵션으로 직접 지정 가능
 
 ### 이미지 파일 지정
@@ -280,8 +290,9 @@ pipeline_test/
 ```
 
 **설명**:
-- 지정한 이미지 파일들을 순환 사용
-- Variants 개수가 이미지 개수보다 많으면 첫 번째 이미지 재사용
+- 지정한 이미지 파일 중 **첫 번째 이미지만 사용**
+- **모든 variants가 같은 이미지와 같은 `img_asset_id`를 사용**
+- `--image-paths`로 여러 이미지를 지정해도 첫 번째 이미지만 사용됩니다
 
 ---
 
@@ -465,5 +476,7 @@ WHERE job_id = 'bf19f5ad-029e-408b-9d65-25180ada9fd9';
 ---
 
 **버전 히스토리**:
+- **v1.2.0** (2025-12-01): 모든 variants가 동일한 `img_asset_id`를 사용하도록 업데이트
+- **v1.1.0** (2025-12-01): YE 파트 시작/종료 트리거 명확화
 - **v1.0.0** (2025-12-01): 초기 버전 작성
 
