@@ -190,12 +190,12 @@ def eng_to_kor(body: EngToKorIn, db: Session = Depends(get_db)):
             text("""
                 INSERT INTO llm_traces (
                     llm_trace_id, job_id, provider, operation_type,
-                    request, response, latency_ms, created_at, updated_at
+                    request, response, latency_ms, created_at
                 )
                 VALUES (
                     :llm_trace_id, :job_id, :provider, :operation_type,
                     CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
-                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    CURRENT_TIMESTAMP
                 )
             """),
             {

@@ -6,10 +6,10 @@
 # - evaluations 테이블에 결과 저장
 ########################################################
 # created_at: 2025-11-26
-# updated_at: 2025-11-28
+# updated_at: 2025-12-01
 # author: LEEYH205
 # description: IoU evaluation API
-# version: 1.1.0
+# version: 1.2.0
 # status: production
 # tags: iou, evaluation
 # dependencies: fastapi, pydantic, sqlalchemy
@@ -185,6 +185,24 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                 logger.error(f"IoU 평가 결과 저장 실패: {str(e)}", exc_info=True)
                 db.rollback()
             
+            # variants 상태를 'done'으로 업데이트 (No detections 케이스)
+            try:
+                db.execute(
+                    text("""
+                        UPDATE jobs_variants 
+                        SET status = 'done', 
+                            current_step = 'iou_eval',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = :job_variants_id
+                    """),
+                    {"job_variants_id": job_variants_id}
+                )
+                db.commit()
+                logger.info(f"Job variant 상태 업데이트 (No detections): job_variants_id={job_variants_id}, status='done'")
+            except Exception as e:
+                logger.error(f"Job 상태 업데이트 실패 (No detections): {e}")
+                db.rollback()
+            
             return IoUEvalOut(
                 job_id=body.job_id,
                 evaluation_id=str(evaluation_id),
@@ -255,6 +273,24 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
                 db.commit()
             except Exception as e:
                 logger.error(f"IoU 평가 결과 저장 실패: {str(e)}", exc_info=True)
+                db.rollback()
+            
+            # variants 상태를 'done'으로 업데이트 (No valid food boxes 케이스)
+            try:
+                db.execute(
+                    text("""
+                        UPDATE jobs_variants 
+                        SET status = 'done', 
+                            current_step = 'iou_eval',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = :job_variants_id
+                    """),
+                    {"job_variants_id": job_variants_id}
+                )
+                db.commit()
+                logger.info(f"Job variant 상태 업데이트 (No valid food boxes): job_variants_id={job_variants_id}, status='done'")
+            except Exception as e:
+                logger.error(f"Job 상태 업데이트 실패 (No valid food boxes): {e}")
                 db.rollback()
             
             return IoUEvalOut(

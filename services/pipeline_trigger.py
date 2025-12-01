@@ -3,10 +3,10 @@ Job 상태 변화에 따라 다음 파이프라인 단계를 자동으로 트리
 """
 ########################################################
 # created_at: 2025-11-28
-# updated_at: 2025-11-28
+# updated_at: 2025-12-01
 # author: LEEYH205
 # description: Job 상태 변화에 따라 다음 파이프라인 단계를 자동으로 트리거
-# version: 1.1.0
+# version: 2.1.0
 # status: development
 # tags: pipeline, trigger, automation
 # dependencies: httpx, asyncpg
@@ -111,6 +111,15 @@ async def trigger_next_pipeline_stage(
         logger.debug(
             f"다음 단계 없음: job_id={job_id}, "
             f"current_step={current_step}, status={status}"
+        )
+        return
+    
+    # Job 레벨 단계가 아닌 경우 (variant별 실행) 스킵
+    # (variant별 단계는 _process_job_variant_state_change에서 처리)
+    if not stage_info.get('is_job_level', False):
+        logger.debug(
+            f"Variant별 실행 단계이므로 Job 레벨 트리거 스킵: job_id={job_id}, "
+            f"next_step={stage_info['next_step']}"
         )
         return
     

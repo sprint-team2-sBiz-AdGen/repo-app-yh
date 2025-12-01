@@ -414,6 +414,261 @@ def check_instagram_feeds(db: Session, job_id: str):
     return rows
 
 
+def print_detailed_results(db: Session, job_id: str):
+    """Job의 각 단계별 결과물을 상세하게 출력"""
+    print("\n" + "=" * 80)
+    print("📊 파이프라인 결과물 상세 정보")
+    print("=" * 80)
+    
+    try:
+        # Job 정보
+        job = db.execute(text("""
+            SELECT job_id, tenant_id, status, current_step, created_at
+            FROM jobs
+            WHERE job_id = :job_id
+        """), {"job_id": job_id}).first()
+        
+        if not job:
+            print("❌ Job을 찾을 수 없습니다.")
+            return
+        
+        print(f"\n📋 Job 정보:")
+        print(f"   - Job ID: {job[0]}")
+        print(f"   - Tenant ID: {job[1]}")
+        print(f"   - Status: {job[2]}")
+        print(f"   - Current Step: {job[3]}")
+        print(f"   - Created At: {job[4]}")
+        
+        # 1. 원본 이미지 경로
+        print(f"\n{'─' * 80}")
+        print("🖼️  원본 이미지")
+        print(f"{'─' * 80}")
+        job_input = db.execute(text("""
+            SELECT ji.img_asset_id, ia.image_url
+            FROM job_inputs ji
+            INNER JOIN image_assets ia ON ji.img_asset_id = ia.image_asset_id
+            WHERE ji.job_id = :job_id
+        """), {"job_id": job_id}).first()
+        
+        if job_input:
+            # 절대 경로 변환
+            if job_input[1] and job_input[1].startswith("/assets/"):
+                original_path = os.path.join(ASSETS_DIR, job_input[1][len("/assets/"):])
+                print(f"   - Image Asset ID: {job_input[0]}")
+                print(f"   - Image URL: {job_input[1]}")
+                print(f"   - 절대 경로: {original_path}")
+                print(f"   - 파일 존재: {'✅' if os.path.exists(original_path) else '❌'}")
+            else:
+                print(f"   - Image Asset ID: {job_input[0]}")
+                print(f"   - Image URL: {job_input[1]}")
+                print(f"   - 절대 경로: (URL 형식 오류)")
+        else:
+            print("   - 원본 이미지를 찾을 수 없습니다.")
+        
+        # 2. Variants별 각 단계 결과물
+        print(f"\n{'─' * 80}")
+        print("📦 Variants별 단계별 결과물")
+        print(f"{'─' * 80}")
+        
+        variants = db.execute(text("""
+            SELECT job_variants_id, creation_order, status, current_step, overlaid_img_asset_id
+            FROM jobs_variants
+            WHERE job_id = :job_id
+            ORDER BY creation_order
+        """), {"job_id": job_id}).fetchall()
+        
+        for variant in variants:
+            variant_id = variant[0]
+            order = variant[1]
+            status = variant[2]
+            current_step = variant[3]
+            overlaid_img_asset_id = variant[4]
+            
+            print(f"\n   Variant {order} (ID: {str(variant_id)[:8]}...):")
+            print(f"      - Status: {status}, Current Step: {current_step}")
+            
+            # 최종 오버레이 이미지 경로
+            if overlaid_img_asset_id:
+                overlay_asset = db.execute(text("""
+                    SELECT image_url
+                    FROM image_assets
+                    WHERE image_asset_id = :asset_id
+                """), {"asset_id": overlaid_img_asset_id}).first()
+                
+                if overlay_asset and overlay_asset[0]:
+                    # 절대 경로 변환
+                    if overlay_asset[0].startswith("/assets/"):
+                        overlay_path = os.path.join(ASSETS_DIR, overlay_asset[0][len("/assets/"):])
+                        print(f"      - 최종 오버레이 이미지:")
+                        print(f"        * URL: {overlay_asset[0]}")
+                        print(f"        * 절대 경로: {overlay_path}")
+                        print(f"        * 파일 존재: {'✅' if os.path.exists(overlay_path) else '❌'}")
+                    else:
+                        print(f"      - 최종 오버레이 이미지:")
+                        print(f"        * URL: {overlay_asset[0]}")
+                        print(f"        * 절대 경로: (URL 형식 오류)")
+            
+            # overlay_layouts에서 render URL 확인 (fallback)
+            if not overlaid_img_asset_id:
+                overlay_layout = db.execute(text("""
+                    SELECT layout->'render'->>'url' as render_url
+                    FROM overlay_layouts
+                    WHERE job_variants_id = :variant_id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """), {"variant_id": variant_id}).first()
+                
+                if overlay_layout and overlay_layout[0]:
+                    # 절대 경로 변환
+                    if overlay_layout[0].startswith("/assets/"):
+                        render_path = os.path.join(ASSETS_DIR, overlay_layout[0][len("/assets/"):])
+                        print(f"      - 오버레이 렌더 이미지:")
+                        print(f"        * URL: {overlay_layout[0]}")
+                        print(f"        * 절대 경로: {render_path}")
+                        print(f"        * 파일 존재: {'✅' if os.path.exists(render_path) else '❌'}")
+                    else:
+                        print(f"      - 오버레이 렌더 이미지:")
+                        print(f"        * URL: {overlay_layout[0]}")
+                        print(f"        * 절대 경로: (URL 형식 오류)")
+            
+            # 각 단계별 평가 결과
+            # OCR 평가
+            ocr_eval = db.execute(text("""
+                SELECT e.metrics->>'ocr_accuracy' as ocr_accuracy,
+                       e.metrics->>'similarity' as similarity,
+                       e.metrics->>'ocr_confidence' as ocr_confidence
+                FROM evaluations e
+                INNER JOIN overlay_layouts ol ON e.overlay_id = ol.overlay_id
+                WHERE ol.job_variants_id = :variant_id
+                  AND e.evaluation_type = 'ocr'
+                ORDER BY e.created_at DESC
+                LIMIT 1
+            """), {"variant_id": variant_id}).first()
+            
+            if ocr_eval:
+                ocr_accuracy = ocr_eval[0] if ocr_eval[0] else None
+                similarity = ocr_eval[1] if ocr_eval[1] else None
+                ocr_confidence = ocr_eval[2] if ocr_eval[2] else None
+                if ocr_accuracy is not None:
+                    print(f"      - OCR 평가:")
+                    print(f"        * OCR 정확도: {float(ocr_accuracy):.4f}" if ocr_accuracy else "        * OCR 정확도: N/A")
+                    if similarity is not None:
+                        print(f"        * 유사도: {float(similarity):.4f}")
+                    if ocr_confidence is not None:
+                        print(f"        * OCR 신뢰도: {float(ocr_confidence):.4f}")
+                else:
+                    print(f"      - OCR 평가: N/A")
+            
+            # Readability 평가
+            readability_eval = db.execute(text("""
+                SELECT e.metrics->>'readability_score' as readability_score
+                FROM evaluations e
+                INNER JOIN overlay_layouts ol ON e.overlay_id = ol.overlay_id
+                WHERE ol.job_variants_id = :variant_id
+                  AND e.evaluation_type = 'readability'
+                ORDER BY e.created_at DESC
+                LIMIT 1
+            """), {"variant_id": variant_id}).first()
+            
+            if readability_eval:
+                print(f"      - Readability 평가 점수: {readability_eval[0] if readability_eval[0] else 'N/A'}")
+            
+            # IoU 평가
+            iou_eval = db.execute(text("""
+                SELECT e.metrics->>'iou_with_food' as iou_score, e.metrics->>'overlap_detected' as overlap
+                FROM evaluations e
+                INNER JOIN overlay_layouts ol ON e.overlay_id = ol.overlay_id
+                WHERE ol.job_variants_id = :variant_id
+                  AND e.evaluation_type = 'iou'
+                ORDER BY e.created_at DESC
+                LIMIT 1
+            """), {"variant_id": variant_id}).first()
+            
+            if iou_eval:
+                print(f"      - IoU 평가:")
+                print(f"        * IoU 점수: {iou_eval[0] if iou_eval[0] else 'N/A'}")
+                print(f"        * 겹침 감지: {iou_eval[1] if iou_eval[1] else 'N/A'}")
+        
+        # 3. 광고 카피 문구
+        print(f"\n{'─' * 80}")
+        print("📝 광고 카피 문구")
+        print(f"{'─' * 80}")
+        
+        ad_copy_gens = db.execute(text("""
+            SELECT generation_stage, ad_copy_kor, ad_copy_eng, refined_ad_copy_eng, status
+            FROM txt_ad_copy_generations
+            WHERE job_id = :job_id
+            ORDER BY 
+                CASE generation_stage
+                    WHEN 'kor_to_eng' THEN 1
+                    WHEN 'ad_copy_eng' THEN 2
+                    WHEN 'refined_ad_copy' THEN 3
+                    WHEN 'eng_to_kor' THEN 4
+                END
+        """), {"job_id": job_id}).fetchall()
+        
+        for gen in ad_copy_gens:
+            stage = gen[0]
+            kor = gen[1]
+            eng = gen[2]
+            refined = gen[3]
+            status = gen[4]
+            
+            print(f"\n   [{stage}] (Status: {status}):")
+            if kor:
+                kor_preview = kor[:100] + "..." if len(kor) > 100 else kor
+                print(f"      - 한글: {kor_preview}")
+            if eng:
+                eng_preview = eng[:100] + "..." if len(eng) > 100 else eng
+                print(f"      - 영어: {eng_preview}")
+            if refined:
+                refined_preview = refined[:100] + "..." if len(refined) > 100 else refined
+                print(f"      - 조정된 영어: {refined_preview}")
+        
+        # 4. 인스타그램 피드
+        print(f"\n{'─' * 80}")
+        print("📱 인스타그램 피드")
+        print(f"{'─' * 80}")
+        
+        feeds = db.execute(text("""
+            SELECT instagram_feed_id, instagram_ad_copy, hashtags, ad_copy_kor, created_at
+            FROM instagram_feeds
+            WHERE job_id = :job_id
+            ORDER BY created_at DESC
+        """), {"job_id": job_id}).fetchall()
+        
+        if feeds:
+            for feed in feeds:
+                feed_id = feed[0]
+                ad_copy = feed[1]
+                hashtags = feed[2]
+                ad_copy_kor = feed[3]
+                created_at = feed[4]
+                
+                print(f"\n   Feed ID: {feed_id}")
+                print(f"   Created At: {created_at}")
+                
+                if ad_copy_kor:
+                    kor_preview = ad_copy_kor[:150] + "..." if len(ad_copy_kor) > 150 else ad_copy_kor
+                    print(f"   한글 광고문구: {kor_preview}")
+                
+                if ad_copy:
+                    ad_copy_preview = ad_copy[:200] + "..." if len(ad_copy) > 200 else ad_copy
+                    print(f"   피드글:")
+                    print(f"   {ad_copy_preview}")
+                
+                if hashtags:
+                    print(f"   해시태그: {hashtags}")
+        else:
+            print("   인스타그램 피드가 생성되지 않았습니다.")
+        
+        print("\n" + "=" * 80)
+        
+    except Exception as e:
+        logger.error(f"상세 결과 출력 중 오류: {e}", exc_info=True)
+        print(f"❌ 오류 발생: {e}")
+
+
 def print_table_status(db: Session, job_id: str, step_name: str = ""):
     """jobs와 jobs_variants 테이블 상태 출력 (test_job_variants_pipeline.py 구조 참고)"""
     print(f"\n{'=' * 60}")
@@ -511,6 +766,8 @@ def monitor_pipeline_progress(job_id: str, tenant_id: str, max_wait_minutes: int
                 print("=" * 60)
                 logger.info(f"파이프라인 완료: job_id={job_id}, 소요 시간={elapsed_total}초")
                 print_table_status(db, job_id, "최종 상태")
+                # 상세 결과물 출력
+                print_detailed_results(db, job_id)
                 break
             
             # 실패 확인
@@ -563,6 +820,8 @@ def monitor_pipeline_progress(job_id: str, tenant_id: str, max_wait_minutes: int
         print("=" * 60)
         logger.info(f"파이프라인 모니터링 종료: job_id={job_id}, 총 소요 시간={elapsed_total}초")
         print_table_status(db, job_id, "최종 상태")
+        # 상세 결과물 출력
+        print_detailed_results(db, job_id)
         
     except Exception as e:
         logger.error(f"파이프라인 모니터링 중 오류: {e}", exc_info=True)
