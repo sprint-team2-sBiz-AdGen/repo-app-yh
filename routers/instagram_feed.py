@@ -239,17 +239,17 @@ def create_instagram_feed(body: InstagramFeedIn, db: Session = Depends(get_db)):
         completion_tokens = token_usage.get("completion_tokens") if token_usage else None
         total_tokens = token_usage.get("total_tokens") if token_usage else None
         
-        # Step 8: llm_traces에 저장 (토큰 정보 포함)
+        # Step 8: llm_traces에 저장 (토큰 정보 및 llm_model_id 포함)
         db.execute(
             text("""
                 INSERT INTO llm_traces (
-                    llm_trace_id, job_id, provider, operation_type,
+                    llm_trace_id, job_id, provider, llm_model_id, operation_type,
                     request, response, latency_ms,
                     prompt_tokens, completion_tokens, total_tokens, token_usage,
                     created_at, updated_at
                 )
                 VALUES (
-                    :llm_trace_id, :job_id, :provider, :operation_type,
+                    :llm_trace_id, :job_id, :provider, :llm_model_id, :operation_type,
                     CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
                     :prompt_tokens, :completion_tokens, :total_tokens, CAST(:token_usage AS jsonb),
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
@@ -259,6 +259,7 @@ def create_instagram_feed(body: InstagramFeedIn, db: Session = Depends(get_db)):
                 "llm_trace_id": llm_trace_id,
                 "job_id": job_id,
                 "provider": "gpt",
+                "llm_model_id": llm_model_id,
                 "operation_type": "feed_gen",
                 "request": json.dumps(request_data),
                 "response": json.dumps(response_data),

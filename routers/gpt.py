@@ -26,7 +26,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from models import GPTAdCopyIn, EngToKorIn, EngToKorOut
 from services.gpt_service import translate_eng_to_kor
-from database import get_db, Job, TxtAdCopyGeneration, LLMTrace, InstagramFeed
+from database import get_db, Job, TxtAdCopyGeneration, LLMTrace, InstagramFeed, LLMModel
+from config import GPT_MODEL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +145,26 @@ def eng_to_kor(body: EngToKorIn, db: Session = Depends(get_db)):
         ad_copy_eng = ad_copy_gen.ad_copy_eng
         logger.info(f"Found English ad copy: job_id={job_id}, length={len(ad_copy_eng)}")
         
-        # Step 2: GPT API 호출: 영어 → 한글 변환
+        # Step 2: LLM 모델 조회
+        llm_model = db.query(LLMModel).filter(
+            LLMModel.model_name == GPT_MODEL_NAME,
+            LLMModel.is_active == 'true'
+        ).first()
+        
+        if not llm_model:
+            logger.warning(f"⚠️ LLM 모델을 찾을 수 없습니다: {GPT_MODEL_NAME}. 기본 모델 정보로 저장합니다.")
+            llm_model_id = None
+        else:
+            llm_model_id = llm_model.llm_model_id
+        
+        # Step 3: GPT API 호출: 영어 → 한글 변환
         try:
             result = translate_eng_to_kor(ad_copy_eng)
             ad_copy_kor = result["ad_copy_kor"]
             latency_ms = result["latency_ms"]
-            token_usage = result["token_usage"]
-            gpt_response_raw = result["gpt_response_raw"]
-            prompt_used = result["prompt_used"]
+            token_usage = result.get("token_usage")
+            gpt_response_raw = result.get("gpt_response_raw")
+            prompt_used = result.get("prompt_used")
         except Exception as e:
             logger.error(f"GPT translation failed: {str(e)}", exc_info=True)
             # jobs 테이블 상태를 'failed'로 업데이트
@@ -170,7 +183,12 @@ def eng_to_kor(body: EngToKorIn, db: Session = Depends(get_db)):
                 detail=f"GPT translation failed: {str(e)}"
             )
         
-        # Step 3: llm_traces 레코드 생성
+        # Step 4: 토큰 사용량 추출 (llm_traces에 저장하기 위해)
+        prompt_tokens = token_usage.get("prompt_tokens") if token_usage else None
+        completion_tokens = token_usage.get("completion_tokens") if token_usage else None
+        total_tokens = token_usage.get("total_tokens") if token_usage else None
+        
+        # Step 5: llm_traces 레코드 생성
         llm_trace_id = uuid.uuid4()
         
         # 요청 데이터 구성
@@ -185,31 +203,39 @@ def eng_to_kor(body: EngToKorIn, db: Session = Depends(get_db)):
             "token_usage": token_usage
         }
         
-        # llm_traces에 저장
+        # llm_traces에 저장 (토큰 정보 포함)
         db.execute(
             text("""
                 INSERT INTO llm_traces (
-                    llm_trace_id, job_id, provider, operation_type,
-                    request, response, latency_ms, created_at
+                    llm_trace_id, job_id, provider, llm_model_id, operation_type,
+                    request, response, latency_ms,
+                    prompt_tokens, completion_tokens, total_tokens, token_usage,
+                    created_at, updated_at
                 )
                 VALUES (
-                    :llm_trace_id, :job_id, :provider, :operation_type,
+                    :llm_trace_id, :job_id, :provider, :llm_model_id, :operation_type,
                     CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
-                    CURRENT_TIMESTAMP
+                    :prompt_tokens, :completion_tokens, :total_tokens, CAST(:token_usage AS jsonb),
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
             """),
             {
                 "llm_trace_id": llm_trace_id,
                 "job_id": job_id,
                 "provider": "gpt",
+                "llm_model_id": llm_model_id,
                 "operation_type": "eng_to_kor",
                 "request": json.dumps(request_data),
                 "response": json.dumps(response_data),
-                "latency_ms": latency_ms
+                "latency_ms": latency_ms,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "token_usage": json.dumps(token_usage) if token_usage else None
             }
         )
         
-        # Step 4: txt_ad_copy_generations 레코드 생성/업데이트
+        # Step 6: txt_ad_copy_generations 레코드 생성/업데이트
         ad_copy_gen_id = uuid.uuid4()
         
         # 기존 레코드 확인
@@ -267,7 +293,7 @@ def eng_to_kor(body: EngToKorIn, db: Session = Depends(get_db)):
             )
             logger.info(f"Created new txt_ad_copy_generations record: ad_copy_gen_id={ad_copy_gen_id}")
         
-        # Step 5: instagram_feeds.ad_copy_kor 업데이트 (기존 레코드가 있으면)
+        # Step 7: instagram_feeds.ad_copy_kor 업데이트 (기존 레코드가 있으면)
         db.execute(
             text("""
                 UPDATE instagram_feeds
@@ -281,7 +307,7 @@ def eng_to_kor(body: EngToKorIn, db: Session = Depends(get_db)):
             }
         )
         
-        # Step 6: jobs 테이블 업데이트
+        # Step 8: jobs 테이블 업데이트
         db.execute(
             text("""
                 UPDATE jobs
@@ -293,7 +319,7 @@ def eng_to_kor(body: EngToKorIn, db: Session = Depends(get_db)):
             {"job_id": job_id}
         )
         
-        # Step 7: 커밋
+        # Step 9: 커밋
         try:
             db.commit()
             logger.info(f"Saved to DB: job_id={job_id}, llm_trace_id={llm_trace_id}, ad_copy_gen_id={ad_copy_gen_id}, latency_ms={latency_ms:.2f}")
@@ -305,7 +331,7 @@ def eng_to_kor(body: EngToKorIn, db: Session = Depends(get_db)):
                 detail=f"Failed to save translation result to database: {str(e)}"
             )
         
-        # Step 8: 응답 반환
+        # Step 10: 응답 반환
         return EngToKorOut(
             job_id=body.job_id,
             llm_trace_id=str(llm_trace_id),

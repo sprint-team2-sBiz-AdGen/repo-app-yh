@@ -126,7 +126,7 @@ class VLMTrace(Base):
     vlm_trace_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"))
     provider = Column(String(255))  # 'llava', etc.
-    prompt_id = Column(UUID(as_uuid=True), nullable=True)
+    prompt_id = Column(UUID(as_uuid=True), ForeignKey("vlm_prompt_assets.prompt_asset_id"), nullable=True)  # FK: VLM 프롬프트 참조
     operation_type = Column(String(255))  # 'analyze', 'planner', 'judge'
     request = Column(JSONB, nullable=True)
     response = Column(JSONB, nullable=True)
@@ -233,6 +233,7 @@ class LLMTrace(Base):
     llm_trace_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=True)
     provider = Column(String(255), nullable=True)  # 'gpt', 'anthropic', etc.
+    llm_model_id = Column(UUID(as_uuid=True), ForeignKey("llm_models.llm_model_id"), nullable=True)  # FK: 사용된 LLM 모델 참조
     tone_style_id = Column(UUID(as_uuid=True), ForeignKey("tone_styles.tone_style_id"), nullable=True)
     enhanced_img_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"), nullable=True)
     prompt_id = Column(UUID(as_uuid=True), nullable=True)
