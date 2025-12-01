@@ -12,9 +12,11 @@ import sys
 import os
 import uuid
 import time
+import signal
 import requests
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent.parent
@@ -35,6 +37,20 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8011")
+
+# 전역 변수
+running = True
+created_jobs = []  # 생성된 job_id들 (통계용)
+
+def signal_handler(sig, frame):
+    """종료 신호 처리"""
+    global running
+    print("\n\n종료 신호 수신. Job 생성을 종료합니다...")
+    logger.info("종료 신호 수신. Job 생성을 종료합니다...")
+    running = False
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 
 def create_test_job_with_js_data(
@@ -944,6 +960,243 @@ def trigger_pipeline_start(job_id: str, tenant_id: str, variant_ids: list):
         db.close()
 
 
+def check_job_completed(db: Session, job_id: str) -> bool:
+    """Job이 완료되었는지 확인 (instagram_feed_gen, done)"""
+    result = db.execute(
+        text("""
+            SELECT status, current_step
+            FROM jobs
+            WHERE job_id = :job_id
+        """),
+        {"job_id": job_id}
+    ).first()
+    
+    if result:
+        status, current_step = result[0], result[1]
+        return current_step == 'instagram_feed_gen' and status == 'done'
+    return False
+
+
+def check_all_variants_completed(db: Session, job_id: str) -> bool:
+    """모든 Variants가 완료되었는지 확인 (iou_eval, done)"""
+    variants = db.execute(
+        text("""
+            SELECT status, current_step
+            FROM jobs_variants
+            WHERE job_id = :job_id
+        """),
+        {"job_id": job_id}
+    ).fetchall()
+    
+    if not variants:
+        return False
+    
+    for variant in variants:
+        status, current_step = variant[0], variant[1]
+        if not (current_step == 'iou_eval' and status == 'done'):
+            return False
+    
+    return True
+
+
+def create_and_trigger_job(
+    tenant_id: str = "yh_pipeline_test_tenant",
+    image_path: Optional[str] = None,
+    desc_kor: str = "맛있는 부대찌개를 만나보세요",
+    variants_count: int = 3
+) -> Optional[str]:
+    """Job 생성 및 트리거 발동"""
+    global created_jobs
+    
+    try:
+        logger.info(f"새로운 job 생성 시작 (variants: {variants_count}개)...")
+        
+        # 1. Job 생성 및 JS 파트 데이터 생성
+        job_data = create_test_job_with_js_data(
+            tenant_id=tenant_id,
+            image_path=image_path,
+            desc_kor=desc_kor,
+            variants_count=variants_count
+        )
+        
+        job_id = job_data["job_id"]
+        variant_ids = job_data["variant_ids"]
+        
+        logger.info(
+            f"✓ Job 생성 완료: {job_id[:8]}... "
+            f"(tenant: {tenant_id}, variants: {len(variant_ids)}개)"
+        )
+        
+        # 2. 트리거 발동
+        trigger_pipeline_start(job_id, tenant_id, variant_ids)
+        
+        created_jobs.append({
+            "job_id": job_id,
+            "created_at": datetime.now(),
+            "variants_count": len(variant_ids)
+        })
+        
+        return job_id
+        
+    except Exception as e:
+        logger.error(f"Job 생성 및 트리거 발동 실패: {e}", exc_info=True)
+        return None
+
+
+def main_loop(
+    tenant_id: str = "yh_pipeline_test_tenant",
+    image_path: Optional[str] = None,
+    desc_kor: str = "맛있는 부대찌개를 만나보세요",
+    variants_count: int = 3,
+    once: bool = False,
+    wait_for_completion: bool = False
+):
+    """메인 루프"""
+    global running, created_jobs
+    
+    if once:
+        logger.info("=" * 60)
+        logger.info("Job 생성 (단일 실행)")
+        logger.info("=" * 60)
+        logger.info(f"Tenant ID: {tenant_id}")
+        logger.info(f"Variants 개수: {variants_count}개")
+        logger.info("=" * 60)
+        
+        # 한 번만 생성
+        job_id = create_and_trigger_job(
+            tenant_id=tenant_id,
+            image_path=image_path,
+            desc_kor=desc_kor,
+            variants_count=variants_count
+        )
+        
+        if job_id:
+            logger.info("=" * 60)
+            logger.info("✅ Job 생성 완료")
+            logger.info("=" * 60)
+            logger.info(f"Job ID: {job_id}")
+            logger.info(f"Variants: {variants_count}개")
+            logger.info("=" * 60)
+            return job_id
+        else:
+            logger.error("❌ Job 생성 실패")
+            return None
+    else:
+        logger.info("=" * 60)
+        logger.info("백그라운드 Job 생성 시작")
+        logger.info("=" * 60)
+        logger.info(f"Tenant ID: {tenant_id}")
+        if wait_for_completion:
+            logger.info("모드: 이전 Job 완료 대기 후 생성")
+        else:
+            logger.info("모드: 주기적 생성 (60초 간격)")
+        logger.info(f"Variants 개수: {variants_count}개")
+        logger.info("종료하려면 Ctrl+C를 누르세요")
+        logger.info("=" * 60)
+        
+        last_create_time = 0
+        start_time = time.time()
+        current_job_id = None  # 현재 실행 중인 job 추적
+        
+        while running:
+            try:
+                current_time = time.time()
+                
+                if wait_for_completion:
+                    # 이전 job 완료 대기 모드
+                    if current_job_id:
+                        # 현재 job 완료 확인
+                        db = SessionLocal()
+                        try:
+                            job_completed = check_job_completed(db, current_job_id)
+                            variants_completed = check_all_variants_completed(db, current_job_id)
+                            
+                            if job_completed and variants_completed:
+                                logger.info(
+                                    f"✅ 이전 Job 완료: {current_job_id[:8]}... "
+                                    f"(instagram_feed_gen, done)"
+                                )
+                                current_job_id = None  # 다음 job 생성 준비
+                            else:
+                                # 아직 완료되지 않음, 대기
+                                time.sleep(10)  # 10초마다 확인
+                                continue
+                        finally:
+                            db.close()
+                    else:
+                        # 이전 job이 없거나 완료됨, 새 job 생성
+                        job_id = create_and_trigger_job(
+                            tenant_id=tenant_id,
+                            image_path=image_path,
+                            desc_kor=desc_kor,
+                            variants_count=variants_count
+                        )
+                        
+                        if job_id:
+                            current_job_id = job_id
+                            elapsed = int(current_time - start_time)
+                            logger.info(
+                                f"📊 통계: 총 {len(created_jobs)}개 job 생성 "
+                                f"(경과 시간: {elapsed}초)"
+                            )
+                            logger.info(
+                                f"⏳ 다음 Job 생성을 위해 완료 대기 중... "
+                                f"(현재 Job: {job_id[:8]}...)"
+                            )
+                        time.sleep(10)  # 10초마다 확인
+                else:
+                    # 기존 방식: 주기적 생성
+                    if current_time - last_create_time >= 60:  # 60초 간격
+                        job_id = create_and_trigger_job(
+                            tenant_id=tenant_id,
+                            image_path=image_path,
+                            desc_kor=desc_kor,
+                            variants_count=variants_count
+                        )
+                        
+                        if job_id:
+                            elapsed = int(current_time - start_time)
+                            logger.info(
+                                f"📊 통계: 총 {len(created_jobs)}개 job 생성 "
+                                f"(경과 시간: {elapsed}초, "
+                                f"평균 간격: {elapsed // len(created_jobs) if created_jobs else 0}초)"
+                            )
+                        
+                        last_create_time = current_time
+                    
+                    time.sleep(1)  # 1초마다 확인
+                    
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                logger.error(f"오류 발생: {e}", exc_info=True)
+                time.sleep(5)
+        
+        # 종료 시 통계 출력
+        logger.info("=" * 60)
+        logger.info("백그라운드 Job 생성 종료")
+        logger.info("=" * 60)
+        logger.info(f"총 생성된 Job 개수: {len(created_jobs)}개")
+        
+        if created_jobs:
+            total_time = time.time() - start_time
+            logger.info(f"총 실행 시간: {int(total_time)}초")
+            if wait_for_completion:
+                logger.info("모드: 이전 Job 완료 대기 후 생성")
+            else:
+                logger.info(f"평균 생성 간격: {int(total_time / len(created_jobs))}초")
+            
+            logger.info("\n생성된 Job 목록:")
+            for i, job_info in enumerate(created_jobs[-10:], 1):  # 최근 10개만 출력
+                logger.info(
+                    f"  {i}. {job_info['job_id'][:8]}... "
+                    f"(variants: {job_info['variants_count']}개, "
+                    f"created: {job_info['created_at'].strftime('%Y-%m-%d %H:%M:%S')})"
+                )
+        
+        logger.info("=" * 60)
+
+
 def main():
     """메인 함수"""
     import argparse
@@ -953,61 +1206,70 @@ def main():
     parser.add_argument("--image-path", type=str, default=None, help="이미지 파일 경로")
     parser.add_argument("--desc-kor", type=str, default="맛있는 부대찌개를 만나보세요", help="한국어 설명")
     parser.add_argument("--variants", type=int, default=3, help="Variants 개수")
-    parser.add_argument("--wait", action="store_true", help="파이프라인 완료까지 대기")
-    parser.add_argument("--max-wait", type=int, default=30, help="최대 대기 시간 (분)")
+    parser.add_argument("--wait", action="store_true", help="파이프라인 완료까지 대기 (단일 실행 모드)")
+    parser.add_argument("--max-wait", type=int, default=30, help="최대 대기 시간 (분, --wait 옵션 사용 시)")
+    parser.add_argument("--once", action="store_true", help="Job을 한 번만 생성하고 종료 (기본: False, 백그라운드 실행)")
+    parser.add_argument("--wait-for-completion", action="store_true", help="이전 Job 완료 (instagram_feed_gen, done) 대기 후 다음 Job 생성 (기본: False)")
     
     args = parser.parse_args()
     
     try:
-        logger.info("=" * 60)
-        logger.info("YH 파트 파이프라인 테스트 시작")
-        logger.info(f"  - Tenant ID: {args.tenant_id}")
-        logger.info(f"  - Variants: {args.variants}개")
-        logger.info(f"  - Max Wait: {args.max_wait}분")
-        logger.info("=" * 60)
-        
-        # 1. Job 생성 및 JS 파트 데이터 생성
-        logger.info("Step 1: Job 생성 및 전 단계 데이터 준비 시작")
-        job_data = create_test_job_with_js_data(
-            tenant_id=args.tenant_id,
-            image_path=args.image_path,
-            desc_kor=args.desc_kor,
-            variants_count=args.variants
-        )
-        
-        job_id = job_data["job_id"]
-        tenant_id = job_data["tenant_id"]
-        variant_ids = job_data["variant_ids"]
-        
-        # 2. 트리거 발동을 위해 모든 variant 상태를 업데이트
-        logger.info("Step 2: 파이프라인 트리거 발동 시작")
-        trigger_pipeline_start(job_id, tenant_id, variant_ids)
-        
-        # 3. 파이프라인 진행 상황 모니터링 (옵션)
-        if args.wait:
+        # 단일 실행 모드 (기존 동작)
+        if args.wait and not args.once and not args.wait_for_completion:
+            logger.info("=" * 60)
+            logger.info("YH 파트 파이프라인 테스트 시작 (단일 실행)")
+            logger.info(f"  - Tenant ID: {args.tenant_id}")
+            logger.info(f"  - Variants: {args.variants}개")
+            logger.info(f"  - Max Wait: {args.max_wait}분")
+            logger.info("=" * 60)
+            
+            # 1. Job 생성 및 JS 파트 데이터 생성
+            logger.info("Step 1: Job 생성 및 전 단계 데이터 준비 시작")
+            job_data = create_test_job_with_js_data(
+                tenant_id=args.tenant_id,
+                image_path=args.image_path,
+                desc_kor=args.desc_kor,
+                variants_count=args.variants
+            )
+            
+            job_id = job_data["job_id"]
+            tenant_id = job_data["tenant_id"]
+            variant_ids = job_data["variant_ids"]
+            
+            # 2. 트리거 발동을 위해 모든 variant 상태를 업데이트
+            logger.info("Step 2: 파이프라인 트리거 발동 시작")
+            trigger_pipeline_start(job_id, tenant_id, variant_ids)
+            
+            # 3. 파이프라인 진행 상황 모니터링
             logger.info("Step 3: 파이프라인 모니터링 시작")
             print("\n⏳ 파이프라인 실행 대기 중... (트리거가 감지되면 자동으로 시작됩니다)")
             print("   💡 LLaVA 모델을 GPU에 로드하는 데 시간이 걸릴 수 있습니다...")
             time.sleep(5)  # 트리거가 감지될 시간 대기
             
             monitor_pipeline_progress(job_id, tenant_id, max_wait_minutes=args.max_wait)
+            
+            print("\n" + "=" * 60)
+            print("✅ 테스트 Job 생성 완료")
+            print("=" * 60)
+            print(f"Job ID: {job_id}")
+            print(f"Tenant ID: {tenant_id}")
+            print(f"API Base URL: {API_BASE_URL}")
+            print("=" * 60)
+            
+            logger.info("=" * 60)
+            logger.info("YH 파트 파이프라인 테스트 완료")
+            logger.info(f"  - Job ID: {job_id}")
+            logger.info("=" * 60)
         else:
-            logger.info("Step 3: 파이프라인 모니터링 스킵 (--wait 옵션 없음)")
-            print("\n💡 파이프라인 모니터링을 시작하려면 --wait 옵션을 사용하세요")
-            print(f"   python {__file__} --wait --job-id {job_id}")
-        
-        print("\n" + "=" * 60)
-        print("✅ 테스트 Job 생성 완료")
-        print("=" * 60)
-        print(f"Job ID: {job_id}")
-        print(f"Tenant ID: {tenant_id}")
-        print(f"API Base URL: {API_BASE_URL}")
-        print("=" * 60)
-        
-        logger.info("=" * 60)
-        logger.info("YH 파트 파이프라인 테스트 완료")
-        logger.info(f"  - Job ID: {job_id}")
-        logger.info("=" * 60)
+            # 백그라운드 실행 모드
+            main_loop(
+                tenant_id=args.tenant_id,
+                image_path=args.image_path,
+                desc_kor=args.desc_kor,
+                variants_count=args.variants,
+                once=args.once,
+                wait_for_completion=args.wait_for_completion
+            )
         
     except ValueError as e:
         # 전 단계 완료 조건 불만족 등 명시적 오류
