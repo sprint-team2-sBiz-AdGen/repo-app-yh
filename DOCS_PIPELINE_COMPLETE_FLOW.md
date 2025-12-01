@@ -35,6 +35,7 @@
 - ✅ `txt_ad_copy_generations` 테이블에 다음 레코드들이 `status='done'`으로 존재:
   - `generation_stage='kor_to_eng'`: 한국어 → 영어 변환 완료
   - `generation_stage='ad_copy_eng'`: 영어 광고문구 생성 완료
+  - `generation_stage='ad_copy_kor'`: 한글 광고문구 생성 완료 (오버레이에 사용)
 
 #### 1.1.2 YE 파트 완료 조건
 - ✅ `jobs_variants` 테이블에 모든 variants가 `status='done'`, `current_step='img_gen'` 상태
@@ -89,6 +90,14 @@ INSERT INTO txt_ad_copy_generations (
     ad_copy_eng='Experience the perfect harmony...',  # 영어 광고문구
     status='done'
 )
+
+# 7. txt_ad_copy_generations 테이블 - ad_copy_kor
+INSERT INTO txt_ad_copy_generations (
+    ad_copy_gen_id, job_id,
+    generation_stage='ad_copy_kor',
+    ad_copy_kor='매콤하고 고소한 맛이 조화롭게...',  # 한글 광고문구 (오버레이에 사용)
+    status='done'
+)
 ```
 
 #### 1.3.3 YE 파트: 이미지 생성 완료 (Variants)
@@ -107,7 +116,7 @@ INSERT INTO jobs_variants (
 - 각 variant는 독립적으로 이미지 처리 파이프라인 진행
 
 ### 1.4 전 단계 완료 상태 요약
-- ✅ **JS 파트**: `txt_ad_copy_generations`에 `kor_to_eng`, `ad_copy_eng` 레코드 존재 (`status='done'`)
+- ✅ **JS 파트**: `txt_ad_copy_generations`에 `kor_to_eng`, `ad_copy_eng`, `ad_copy_kor` 레코드 존재 (`status='done'`)
 - ✅ **YE 파트**: `jobs_variants.status = 'done'`, `jobs_variants.current_step = 'img_gen'` (모든 variants)
 - ✅ **Job 상태**: `jobs.status = 'done'`, `jobs.current_step = 'img_gen'`
 - ✅ **YH 파트 시작 준비 완료**: 위 조건들이 모두 만족되면 YH 파트 파이프라인 시작 가능
@@ -282,9 +291,10 @@ PIPELINE_STAGES = {
 - **선택적**: 검증 결과에 따라 `refined_ad_copy` 실행 가능
 
 #### 3.3.2 overlay 단계
-- **입력**: `txt_ad_copy_generations.ad_copy_eng` 또는 `refined_ad_copy_eng`
+- **입력**: `txt_ad_copy_generations.ad_copy_kor` (우선순위) 또는 `ad_copy_eng` (fallback)
 - **출력**: `overlay_layouts` 테이블에 오버레이 결과 저장
 - **최종 이미지**: `image_assets` 테이블에 `image_type='overlaid'`로 저장, `jobs_variants.overlaid_img_asset_id` 업데이트
+- **⚠️ 중요**: 오버레이 텍스트는 한글 광고문구(`ad_copy_kor`)를 우선 사용
 
 #### 3.3.3 ad_copy_gen_kor 단계
 - **입력**: `txt_ad_copy_generations.refined_ad_copy_eng` (generation_stage='refined_ad_copy' 또는 'ad_copy_eng')
@@ -334,16 +344,18 @@ if status == 'done' and current_step == 'instagram_feed_gen':
 
 #### 4.3.2 Job 레벨 결과
 - **텍스트 생성 결과**: `txt_ad_copy_generations` 테이블
-  - `kor_to_eng`: 한국어 → 영어 변환
-  - `ad_copy_eng`: 영어 광고문구
-  - `refined_ad_copy`: 조정된 영어 광고문구 (선택적)
-  - `eng_to_kor`: 영어 → 한국어 변환
+  - `kor_to_eng`: 한국어 → 영어 변환 (JS 파트)
+  - `ad_copy_eng`: 영어 광고문구 (JS 파트)
+  - `ad_copy_kor`: 한글 광고문구 (JS 파트, 오버레이에 사용)
+  - `refined_ad_copy`: 조정된 영어 광고문구 (선택적, YH 파트)
+  - `eng_to_kor`: 영어 → 한국어 변환 (YH 파트)
 - **인스타그램 피드**: `instagram_feeds` 테이블
   - ⚠️ **Job당 1개만 생성** (variants 개수와 무관)
   - `instagram_ad_copy`: 생성된 피드 글
   - `hashtags`: 생성된 해시태그
   - `llm_trace_id`: GPT API 호출 기록 참조
   - `job_id`: 해당 Job과 연결
+  - `ad_copy_kor`: 한글 광고문구 (JS 파트에서 생성된 것 사용)
 
 ### 4.4 최종 상태 출력
 ```python
@@ -379,7 +391,7 @@ print_table_status(db, job_id, "최종 상태")
 ## 📝 핵심 요약
 
 ### 전 단계 완료 조건
-- ✅ **JS 파트(텍스트)**: `txt_ad_copy_generations`에 `kor_to_eng`, `ad_copy_eng` 완료
+- ✅ **JS 파트(텍스트)**: `txt_ad_copy_generations`에 `kor_to_eng`, `ad_copy_eng`, `ad_copy_kor` 완료
 - ✅ **YE 파트(이미지)**: 모든 `jobs_variants`가 `img_gen (done)` 완료
 - ✅ **YH 파트 시작**: 위 두 조건이 모두 만족되어야 자동으로 `vlm_analyze` 트리거
 
@@ -398,6 +410,11 @@ print_table_status(db, job_id, "최종 상태")
 ### LLaVA 모델 로딩 시간
 - 첫 번째 `vlm_analyze` 호출 시 GPU에 모델 로딩 시간이 소요됨
 - 모니터링 시 이 시간을 고려하여 대기 시간 설정 필요
+
+### 절대 경로 표시
+- 테스트 스크립트에서 절대 경로는 호스트 경로(`/opt/feedlyai/assets/`)로 표시됨
+- 컨테이너 내부에서는 `/assets/` 경로로 접근하지만, 로그에는 호스트 경로로 변환하여 표시
+- 파일 존재 확인은 컨테이너 내부 경로(`/assets/`)로 수행되므로 호스트 경로에서는 ❌로 표시될 수 있음
 
 ### 트리거 발동 타이밍
 - `trigger_pipeline_start()` 함수에서 상태를 `running` → `done`으로 변경하여 트리거 발동

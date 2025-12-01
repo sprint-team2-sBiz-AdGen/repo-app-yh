@@ -12,10 +12,11 @@
 
 ## 🎯 JS 파트 담당 범위
 
-JS 파트는 다음 두 단계를 담당합니다:
+JS 파트는 다음 세 단계를 담당합니다:
 
 1. **`kor_to_eng`**: 한국어 설명 → 영어 변환
 2. **`ad_copy_eng`**: 영어 광고문구 생성
+3. **`ad_copy_kor`**: 한글 광고문구 생성 (오버레이에 사용)
 
 ---
 
@@ -59,7 +60,9 @@ WHERE j.job_id = :job_id
 - `generation_stage` (TEXT): 생성 단계
   - `'kor_to_eng'`: 한국어 → 영어 변환
   - `'ad_copy_eng'`: 영어 광고문구 생성
+  - `'ad_copy_kor'`: 한글 광고문구 생성 (오버레이에 사용)
 - `ad_copy_eng` (TEXT): 영어 광고문구
+- `ad_copy_kor` (TEXT): 한글 광고문구 (오버레이에 사용)
 - `status` (TEXT): 'queued', 'running', 'done', 'failed'
 - `created_at`, `updated_at`
 
@@ -204,6 +207,68 @@ WHERE j.job_id = :job_id
 
 ---
 
+### 3. `/api/js/gpt/ad-copy-kor` (신규 생성)
+
+**목적**: 한글 광고문구 생성 (오버레이에 사용)
+
+**요청 (Request):**
+```json
+{
+  "job_id": "uuid-string",
+  "tenant_id": "string"
+}
+```
+
+**처리 과정:**
+1. `txt_ad_copy_generations` 테이블에서 `ad_copy_eng` 조회 (generation_stage='ad_copy_eng')
+2. GPT API 호출: 영어 광고문구 → 한글 광고문구 변환
+3. `llm_traces` 테이블에 기록:
+   ```sql
+   INSERT INTO llm_traces (
+       llm_trace_id, job_id, provider, operation_type,
+       request, response, latency_ms, created_at, updated_at
+   ) VALUES (
+       :llm_trace_id, :job_id, 'gpt', 'ad_copy_kor',
+       CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
+       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+   )
+   ```
+4. `txt_ad_copy_generations` 테이블에 레코드 생성:
+   ```sql
+   INSERT INTO txt_ad_copy_generations (
+       ad_copy_gen_id, job_id, llm_trace_id, generation_stage,
+       ad_copy_kor, status, created_at, updated_at
+   ) VALUES (
+       :ad_copy_gen_id, :job_id, :llm_trace_id, 'ad_copy_kor',
+       :ad_copy_kor, 'done', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+   )
+   ```
+5. `jobs` 테이블 업데이트:
+   ```sql
+   UPDATE jobs
+   SET current_step = 'ad_copy_gen_kor',
+       status = 'done',
+       updated_at = CURRENT_TIMESTAMP
+   WHERE job_id = :job_id
+   ```
+
+**응답 (Response):**
+```json
+{
+  "job_id": "uuid-string",
+  "llm_trace_id": "uuid-string",
+  "ad_copy_gen_id": "uuid-string",
+  "ad_copy_kor": "한글 광고문구 텍스트",
+  "status": "done"
+}
+```
+
+**⚠️ 중요**: 
+- 이 한글 광고문구(`ad_copy_kor`)는 YH 파트의 `overlay` 단계에서 오버레이 텍스트로 사용됩니다.
+- YH 파트는 `ad_copy_kor`를 우선적으로 사용하며, 없을 경우 `ad_copy_eng`를 fallback으로 사용합니다.
+
+---
+
 ## 📝 구현 체크리스트
 
 ### 1. 데이터베이스 연결
@@ -216,6 +281,7 @@ WHERE j.job_id = :job_id
 - [ ] GPT API 클라이언트 설정
 - [ ] 한국어 → 영어 변환 프롬프트 작성
 - [ ] 영어 광고문구 생성 프롬프트 작성
+- [ ] 영어 → 한글 광고문구 변환 프롬프트 작성
 - [ ] 에러 처리 및 재시도 로직
 
 ### 3. Trace 관리
@@ -225,7 +291,8 @@ WHERE j.job_id = :job_id
 
 ### 4. 데이터 흐름
 - [ ] `kor_to_eng` 완료 후 `ad_copy_eng` 자동 실행 여부 확인
-- [ ] `txt_ad_copy_generations` 레코드 생성 확인
+- [ ] `ad_copy_eng` 완료 후 `ad_copy_kor` 자동 실행 여부 확인
+- [ ] `txt_ad_copy_generations` 레코드 생성 확인 (kor_to_eng, ad_copy_eng, ad_copy_kor)
 - [ ] `job_inputs.desc_eng` 업데이트 확인
 
 ---
@@ -236,13 +303,16 @@ WHERE j.job_id = :job_id
 - **JS 파트가 생성한 데이터**: `txt_ad_copy_generations` 테이블에 저장
   - `generation_stage='kor_to_eng'`: 영어 설명
   - `generation_stage='ad_copy_eng'`: 영어 광고문구
-- **YH 파트가 사용하는 데이터**: `txt_ad_copy_generations.ad_copy_eng` 조회
-  - `vlm_analyze` 단계에서 사용
-  - `eng_to_kor` 단계에서 사용
+  - `generation_stage='ad_copy_kor'`: 한글 광고문구 (오버레이에 사용)
+- **YH 파트가 사용하는 데이터**: `txt_ad_copy_generations` 테이블 조회
+  - `vlm_analyze` 단계: `ad_copy_eng` 사용
+  - `overlay` 단계: `ad_copy_kor` 우선 사용, 없으면 `ad_copy_eng` fallback
+  - `eng_to_kor` 단계: `refined_ad_copy_eng` 또는 `ad_copy_eng` 사용
 
 ### 실행 시점
 - **`kor_to_eng`**: Job 생성 직후 또는 `img_gen` 전 실행
 - **`ad_copy_eng`**: `kor_to_eng` 완료 후 실행
+- **`ad_copy_kor`**: `ad_copy_eng` 완료 후 실행 (YH 파트 시작 전에 완료되어야 함)
 
 ---
 

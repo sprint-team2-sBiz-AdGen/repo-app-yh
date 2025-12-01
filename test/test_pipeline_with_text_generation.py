@@ -28,9 +28,7 @@ from PIL import Image, ImageDraw
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import SessionLocal, ImageAsset, Job, JobInput, JobVariant
-from utils import save_asset, abs_from_url
-from fastapi import HTTPException
-from config import ASSETS_DIR
+from utils import save_asset
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -229,7 +227,8 @@ def create_test_job_with_js_data(
         
         # ad_copy_kor: 한글 광고문구 생성 (JS 파트에서 GPT로 생성, 오버레이에 사용)
         # 사용자 입력 한글 description → 영어 번역 → GPT로 한글 광고문구 생성
-        ad_copy_kor = "매콤하고 고소한 맛이 조화롭게 어우러진 부대찌개를 경험해보세요! 정성껏 준비한 신선한 재료와 정통 레시피로 만든 이 요리는 여러분의 마음을 따뜻하게 하고 갈증을 해소해줄 것입니다. 오늘 저희를 방문해보세요!"
+        # ⚠️ 테스트용으로 짧게 생성 (실제 오버레이에 적합한 길이)
+        ad_copy_kor = "맛있는 부대찌개를 만나보세요!"
         ad_copy_kor_gen_id = uuid.uuid4()
         db.execute(text("""
             INSERT INTO txt_ad_copy_generations (
@@ -495,21 +494,19 @@ def print_detailed_results(db: Session, job_id: str):
         
         if job_input:
             # 절대 경로 변환
-            try:
-                if job_input[1] and job_input[1].startswith("/assets/"):
-                    original_path = abs_from_url(job_input[1])
-                    print(f"   - Image Asset ID: {job_input[0]}")
-                    print(f"   - Image URL: {job_input[1]}")
-                    print(f"   - 절대 경로: {original_path}")
-                    print(f"   - 파일 존재: {'✅' if os.path.exists(original_path) else '❌'}")
-                else:
-                    print(f"   - Image Asset ID: {job_input[0]}")
-                    print(f"   - Image URL: {job_input[1]}")
-                    print(f"   - 절대 경로: (URL 형식 오류)")
-            except (HTTPException, Exception) as e:
+            if job_input[1] and job_input[1].startswith("/assets/"):
+                # 호스트 경로로 변환 (/assets/ -> /opt/feedlyai/assets/) - 표시용
+                original_path_host = job_input[1].replace("/assets/", "/opt/feedlyai/assets/")
+                # 컨테이너 내부 경로 - 파일 존재 확인용
+                original_path_container = os.path.join(ASSETS_DIR, job_input[1][len("/assets/"):])
                 print(f"   - Image Asset ID: {job_input[0]}")
                 print(f"   - Image URL: {job_input[1]}")
-                print(f"   - 절대 경로 변환 오류: {e}")
+                print(f"   - 절대 경로: {original_path_host}")
+                print(f"   - 파일 존재: {'✅' if os.path.exists(original_path_container) else '❌'}")
+            else:
+                print(f"   - Image Asset ID: {job_input[0]}")
+                print(f"   - Image URL: {job_input[1]}")
+                print(f"   - 절대 경로: (URL 형식 오류)")
         else:
             print("   - 원본 이미지를 찾을 수 없습니다.")
         
@@ -545,21 +542,19 @@ def print_detailed_results(db: Session, job_id: str):
                 
                 if overlay_asset and overlay_asset[0]:
                     # 절대 경로 변환
-                    try:
-                        if overlay_asset[0].startswith("/assets/"):
-                            overlay_path = abs_from_url(overlay_asset[0])
-                            print(f"      - 최종 오버레이 이미지:")
-                            print(f"        * URL: {overlay_asset[0]}")
-                            print(f"        * 절대 경로: {overlay_path}")
-                            print(f"        * 파일 존재: {'✅' if os.path.exists(overlay_path) else '❌'}")
-                        else:
-                            print(f"      - 최종 오버레이 이미지:")
-                            print(f"        * URL: {overlay_asset[0]}")
-                            print(f"        * 절대 경로: (URL 형식 오류)")
-                    except (HTTPException, Exception) as e:
+                    if overlay_asset[0].startswith("/assets/"):
+                        # 호스트 경로로 변환 (/assets/ -> /opt/feedlyai/assets/) - 표시용
+                        overlay_path_host = overlay_asset[0].replace("/assets/", "/opt/feedlyai/assets/")
+                        # 컨테이너 내부 경로 - 파일 존재 확인용
+                        overlay_path_container = os.path.join(ASSETS_DIR, overlay_asset[0][len("/assets/"):])
                         print(f"      - 최종 오버레이 이미지:")
                         print(f"        * URL: {overlay_asset[0]}")
-                        print(f"        * 절대 경로 변환 오류: {e}")
+                        print(f"        * 절대 경로: {overlay_path_host}")
+                        print(f"        * 파일 존재: {'✅' if os.path.exists(overlay_path_container) else '❌'}")
+                    else:
+                        print(f"      - 최종 오버레이 이미지:")
+                        print(f"        * URL: {overlay_asset[0]}")
+                        print(f"        * 절대 경로: (URL 형식 오류)")
             
             # overlay_layouts에서 render URL 확인 (fallback)
             if not overlaid_img_asset_id:
@@ -573,21 +568,19 @@ def print_detailed_results(db: Session, job_id: str):
                 
                 if overlay_layout and overlay_layout[0]:
                     # 절대 경로 변환
-                    try:
-                        if overlay_layout[0].startswith("/assets/"):
-                            render_path = abs_from_url(overlay_layout[0])
-                            print(f"      - 오버레이 렌더 이미지:")
-                            print(f"        * URL: {overlay_layout[0]}")
-                            print(f"        * 절대 경로: {render_path}")
-                            print(f"        * 파일 존재: {'✅' if os.path.exists(render_path) else '❌'}")
-                        else:
-                            print(f"      - 오버레이 렌더 이미지:")
-                            print(f"        * URL: {overlay_layout[0]}")
-                            print(f"        * 절대 경로: (URL 형식 오류)")
-                    except (HTTPException, Exception) as e:
+                    if overlay_layout[0].startswith("/assets/"):
+                        # 호스트 경로로 변환 (/assets/ -> /opt/feedlyai/assets/) - 표시용
+                        render_path_host = overlay_layout[0].replace("/assets/", "/opt/feedlyai/assets/")
+                        # 컨테이너 내부 경로 - 파일 존재 확인용
+                        render_path_container = os.path.join(ASSETS_DIR, overlay_layout[0][len("/assets/"):])
                         print(f"      - 오버레이 렌더 이미지:")
                         print(f"        * URL: {overlay_layout[0]}")
-                        print(f"        * 절대 경로 변환 오류: {e}")
+                        print(f"        * 절대 경로: {render_path_host}")
+                        print(f"        * 파일 존재: {'✅' if os.path.exists(render_path_container) else '❌'}")
+                    else:
+                        print(f"      - 오버레이 렌더 이미지:")
+                        print(f"        * URL: {overlay_layout[0]}")
+                        print(f"        * 절대 경로: (URL 형식 오류)")
             
             # 각 단계별 평가 결과
             # OCR 평가
