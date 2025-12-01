@@ -240,6 +240,11 @@ class LLMTrace(Base):
     request = Column(JSONB, nullable=True)
     response = Column(JSONB, nullable=True)
     latency_ms = Column(Float, nullable=True)
+    # 토큰 사용량 정보 (모든 LLM 호출의 토큰 정보를 통합 관리)
+    prompt_tokens = Column(Integer, nullable=True)  # 프롬프트 토큰 수 (입력)
+    completion_tokens = Column(Integer, nullable=True)  # 생성 토큰 수 (출력)
+    total_tokens = Column(Integer, nullable=True)  # 총 토큰 수
+    token_usage = Column(JSONB, nullable=True)  # 토큰 사용량 정보 원본 (예: {"prompt_tokens": 100, "completion_tokens": 200, "total_tokens": 300})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -262,40 +267,32 @@ class TxtAdCopyGeneration(Base):
 
 
 class InstagramFeed(Base):
-    """Instagram Feeds 데이터베이스 모델"""
+    """Instagram Feeds 데이터베이스 모델 (최적화된 버전)"""
     __tablename__ = "instagram_feeds"
     
     instagram_feed_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=True)  # 파이프라인과 연결 시 사용
-    overlay_id = Column(UUID(as_uuid=True), ForeignKey("overlay_layouts.overlay_id"), nullable=True)  # 오버레이 결과와 연결 시 사용
-    llm_model_id = Column(UUID(as_uuid=True), ForeignKey("llm_models.llm_model_id"), nullable=True)  # 사용된 LLM 모델
-    llm_trace_id = Column(UUID(as_uuid=True), ForeignKey("llm_traces.llm_trace_id"), nullable=True)  # FK: 인스타그램 피드글 생성 GPT API 호출 Trace 참조
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=True)  # FK: 파이프라인과 연결
+    llm_trace_id = Column(UUID(as_uuid=True), ForeignKey("llm_traces.llm_trace_id"), nullable=True)  # FK: 인스타그램 피드글 생성 GPT API 호출 Trace (토큰 정보는 llm_traces에서 조회)
+    overlay_id = Column(UUID(as_uuid=True), ForeignKey("overlay_layouts.overlay_id"), nullable=True)  # FK: 오버레이 결과와 연결 (선택적)
     tenant_id = Column(String(255), nullable=False)  # 테넌트 ID
     
-    # 입력 데이터 (요청 시 받은 정보)
+    # 입력 데이터 (필수)
     refined_ad_copy_eng = Column(Text, nullable=False)  # 조정된 광고문구 (영어)
     ad_copy_kor = Column(Text, nullable=True)  # 한글 광고문구 (GPT Eng→Kor 변환 결과, txt_ad_copy_generations에서 조회)
     tone_style = Column(Text, nullable=False)  # 톤 & 스타일
     product_description = Column(Text, nullable=False)  # 제품 설명
-    store_information = Column(Text, nullable=False)  # 스토어 정보
-    gpt_prompt = Column(Text, nullable=False)  # GPT 프롬프트
+    gpt_prompt = Column(Text, nullable=False)  # GPT 프롬프트 (llm_traces.request에서도 조회 가능하지만 빠른 조회를 위해 유지)
     
-    # 출력 데이터 (생성된 결과)
+    # 출력 데이터 (핵심 결과물)
     instagram_ad_copy = Column(Text, nullable=False)  # 생성된 인스타그램 피드 글
     hashtags = Column(Text, nullable=False)  # 생성된 해시태그
     
-    # LLM 실행 메타데이터 (실제 실행 시 사용된 값)
-    used_temperature = Column(Float, nullable=True)  # 실제 사용된 temperature (기본값과 다를 수 있음)
-    used_max_tokens = Column(Integer, nullable=True)  # 실제 사용된 최대 토큰 수
-    gpt_prompt_used = Column(Text, nullable=True)  # 실제 사용된 전체 프롬프트 (디버깅용)
-    gpt_response_raw = Column(JSONB, nullable=True)  # GPT API 원본 응답 (디버깅/재생성용)
+    # LLM 실행 메타데이터 (llm_traces에 없는 것만, 선택적)
+    used_temperature = Column(Float, nullable=True)  # 실제 사용된 temperature (llm_models 기본값과 다를 수 있음, llm_traces.request에서도 조회 가능)
+    used_max_tokens = Column(Integer, nullable=True)  # 실제 사용된 최대 토큰 수 (llm_models 기본값과 다를 수 있음, llm_traces.request에서도 조회 가능)
     
-    # 성능 메트릭
-    latency_ms = Column(Float, nullable=True)  # GPT API 호출 소요 시간 (밀리초)
-    prompt_tokens = Column(Integer, nullable=True)  # 프롬프트 토큰 수 (입력)
-    completion_tokens = Column(Integer, nullable=True)  # 생성 토큰 수 (출력)
-    total_tokens = Column(Integer, nullable=True)  # 총 토큰 수
-    token_usage = Column(JSONB, nullable=True)  # 토큰 사용량 정보 (원본 JSON, 모니터링용)
+    # 성능 메트릭 (간단한 것만, llm_traces.latency_ms와 동일하지만 빠른 조회를 위해 유지)
+    latency_ms = Column(Float, nullable=True)  # GPT API 호출 소요 시간 (밀리초, llm_traces.latency_ms와 동일)
     
     # 메타데이터
     # pk는 DB에서 자동 생성되므로 SQLAlchemy 모델에서는 제외 (DB 스키마에 따라 다를 수 있음)

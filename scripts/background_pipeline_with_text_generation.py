@@ -1105,22 +1105,36 @@ def main_loop(
                 if wait_for_completion:
                     # 이전 job 완료 대기 모드
                     if current_job_id:
-                        # 현재 job 완료 확인
+                        # 현재 job 완료 확인 (instagram_feed_gen, done만 확인)
                         db = SessionLocal()
                         try:
-                            job_completed = check_job_completed(db, current_job_id)
-                            variants_completed = check_all_variants_completed(db, current_job_id)
+                            job_status = db.execute(
+                                text("""
+                                    SELECT status, current_step
+                                    FROM jobs
+                                    WHERE job_id = :job_id
+                                """),
+                                {"job_id": current_job_id}
+                            ).first()
                             
-                            if job_completed and variants_completed:
-                                logger.info(
-                                    f"✅ 이전 Job 완료: {current_job_id[:8]}... "
-                                    f"(instagram_feed_gen, done)"
-                                )
-                                current_job_id = None  # 다음 job 생성 준비
+                            if job_status:
+                                status, current_step = job_status[0], job_status[1]
+                                job_completed = (current_step == 'instagram_feed_gen' and status == 'done')
+                                
+                                if job_completed:
+                                    logger.info(
+                                        f"✅ 이전 Job 완료: {current_job_id[:8]}... "
+                                        f"(status={status}, current_step={current_step})"
+                                    )
+                                    current_job_id = None  # 다음 job 생성 준비
+                                    time.sleep(2)  # 완료 후 잠시 대기 (DB 업데이트 반영 시간)
+                                else:
+                                    # 아직 완료되지 않음, 대기
+                                    time.sleep(10)  # 10초마다 확인
+                                    continue
                             else:
-                                # 아직 완료되지 않음, 대기
-                                time.sleep(10)  # 10초마다 확인
-                                continue
+                                logger.warning(f"⚠️ Job을 찾을 수 없음: {current_job_id[:8]}...")
+                                current_job_id = None  # 다음 job 생성 준비
                         finally:
                             db.close()
                     else:
@@ -1143,7 +1157,10 @@ def main_loop(
                                 f"⏳ 다음 Job 생성을 위해 완료 대기 중... "
                                 f"(현재 Job: {job_id[:8]}...)"
                             )
-                        time.sleep(10)  # 10초마다 확인
+                            time.sleep(2)  # job 생성 후 잠시 대기
+                        else:
+                            logger.warning("⚠️ Job 생성 실패, 10초 후 재시도...")
+                            time.sleep(10)
                 else:
                     # 기존 방식: 주기적 생성
                     if current_time - last_create_time >= 60:  # 60초 간격

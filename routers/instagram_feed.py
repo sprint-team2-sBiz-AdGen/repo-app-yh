@@ -233,16 +233,25 @@ def create_instagram_feed(body: InstagramFeedIn, db: Session = Depends(get_db)):
             "token_usage": result.get("token_usage")
         }
         
-        # llm_traces에 저장
+        # 토큰 사용량 추출 (llm_traces에 저장하기 위해)
+        token_usage = result.get("token_usage")
+        prompt_tokens = token_usage.get("prompt_tokens") if token_usage else None
+        completion_tokens = token_usage.get("completion_tokens") if token_usage else None
+        total_tokens = token_usage.get("total_tokens") if token_usage else None
+        
+        # Step 8: llm_traces에 저장 (토큰 정보 포함)
         db.execute(
             text("""
                 INSERT INTO llm_traces (
                     llm_trace_id, job_id, provider, operation_type,
-                    request, response, latency_ms, created_at, updated_at
+                    request, response, latency_ms,
+                    prompt_tokens, completion_tokens, total_tokens, token_usage,
+                    created_at, updated_at
                 )
                 VALUES (
                     :llm_trace_id, :job_id, :provider, :operation_type,
                     CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
+                    :prompt_tokens, :completion_tokens, :total_tokens, CAST(:token_usage AS jsonb),
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
             """),
@@ -253,42 +262,32 @@ def create_instagram_feed(body: InstagramFeedIn, db: Session = Depends(get_db)):
                 "operation_type": "feed_gen",
                 "request": json.dumps(request_data),
                 "response": json.dumps(response_data),
-                "latency_ms": result.get("latency_ms")
+                "latency_ms": result.get("latency_ms"),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "token_usage": json.dumps(token_usage) if token_usage else None
             }
         )
         
-        # Step 9: instagram_feeds 테이블에 저장
+        # Step 9: instagram_feeds 테이블에 저장 (최적화된 버전)
         instagram_feed_id = uuid.uuid4()
-        
-        # 토큰 사용량 추출
-        token_usage = result.get("token_usage")
-        prompt_tokens = token_usage.get("prompt_tokens") if token_usage else None
-        completion_tokens = token_usage.get("completion_tokens") if token_usage else None
-        total_tokens = token_usage.get("total_tokens") if token_usage else None
         
         instagram_feed = InstagramFeed(
             instagram_feed_id=instagram_feed_id,
             job_id=job_id,
             llm_trace_id=llm_trace_id,
-            llm_model_id=llm_model_id,
             tenant_id=body.tenant_id,
             refined_ad_copy_eng=refined_ad_copy_eng,
             ad_copy_kor=ad_copy_kor,
             tone_style=tone_style,
             product_description=product_description,
-            store_information=store_information,
             gpt_prompt=gpt_prompt,
             instagram_ad_copy=result["instagram_ad_copy"],
             hashtags=result["hashtags"],
-            used_temperature=0.7,  # 실제 사용된 temperature
-            used_max_tokens=GPT_MAX_TOKENS,  # 실제 사용된 최대 토큰 수
-            gpt_prompt_used=result["prompt_used"],
-            gpt_response_raw=result.get("gpt_response_raw"),
-            latency_ms=result.get("latency_ms"),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            token_usage=token_usage  # 원본 JSON도 저장 (상세 분석용)
+            used_temperature=0.7,  # 실제 사용된 temperature (llm_traces.request에서도 조회 가능)
+            used_max_tokens=GPT_MAX_TOKENS,  # 실제 사용된 최대 토큰 수 (llm_traces.request에서도 조회 가능)
+            latency_ms=result.get("latency_ms")  # llm_traces.latency_ms와 동일하지만 빠른 조회를 위해 유지
         )
         
         db.add(instagram_feed)

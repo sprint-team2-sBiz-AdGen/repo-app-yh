@@ -5,7 +5,8 @@
 이 문서는 **JS 파트**에서 구현해야 할 광고문구 생성 관련 기능에 대한 가이드입니다.
 
 **작성일**: 2025-12-01  
-**버전**: 1.0.0  
+**최종 수정일**: 2025-12-01  
+**버전**: 1.2.0  
 **작성자**: LEEYH205
 
 ---
@@ -66,14 +67,44 @@ WHERE j.job_id = :job_id
 - `status` (TEXT): 'queued', 'running', 'done', 'failed'
 - `created_at`, `updated_at`
 
+#### `llm_models` 테이블 (참고)
+- `llm_model_id` (UUID, PK): LLM 모델 고유 식별자
+- `model_name` (VARCHAR): 모델 이름 (예: 'gpt-4o-mini')
+- `model_version` (VARCHAR): 모델 버전 (예: '2024-07-18')
+- `provider` (VARCHAR): 제공자 (예: 'openai', 'anthropic', 'google')
+- `default_temperature` (FLOAT): 기본 temperature 설정
+- `default_max_tokens` (INTEGER): 기본 최대 토큰 수
+- `is_active` (VARCHAR): 활성화 여부 ('true', 'false')
+- `created_at`, `updated_at`
+
+**LLM 모델 조회 예시:**
+```sql
+SELECT llm_model_id, model_name, default_temperature, default_max_tokens
+FROM llm_models
+WHERE provider = 'openai'
+  AND model_name = 'gpt-4o-mini'
+  AND is_active = 'true'
+LIMIT 1
+```
+
 #### `llm_traces` 테이블
 - `llm_trace_id` (UUID, PK)
 - `job_id` (UUID, FK → jobs)
 - `provider` (TEXT): 'gpt' 등
-- `operation_type` (TEXT): 'kor_to_eng', 'ad_copy_gen' 등
+- `llm_model_id` (UUID, FK → llm_models): 사용된 LLM 모델 참조 (선택적)
+- `tone_style_id` (UUID, FK → tone_styles): 톤 스타일 ID (선택적)
+- `enhanced_img_id` (UUID, FK → image_assets): 향상된 이미지 ID (선택적)
+- `prompt_id` (UUID): 프롬프트 ID (선택적)
+- `operation_type` (TEXT): 'kor_to_eng', 'ad_copy_gen', 'ad_copy_kor' 등
 - `request` (JSONB): GPT API 요청 데이터
 - `response` (JSONB): GPT API 응답 데이터
 - `latency_ms` (FLOAT): API 호출 소요 시간
+- **토큰 사용량 정보** (모든 LLM 호출의 토큰 정보를 통합 관리):
+  - `prompt_tokens` (INTEGER): 프롬프트 토큰 수 (입력)
+  - `completion_tokens` (INTEGER): 생성 토큰 수 (출력)
+  - `total_tokens` (INTEGER): 총 토큰 수
+  - `token_usage` (JSONB): 토큰 사용량 정보 원본 (예: `{"prompt_tokens": 100, "completion_tokens": 200, "total_tokens": 300}`)
+- `created_at`, `updated_at`
 
 ---
 
@@ -94,17 +125,26 @@ WHERE j.job_id = :job_id
 **처리 과정:**
 1. `job_inputs` 테이블에서 `desc_kor` 조회
 2. GPT API 호출: 한국어 → 영어 변환
-3. `llm_traces` 테이블에 기록:
+3. GPT API 호출 후 토큰 사용량 추출 및 `llm_traces` 테이블에 기록:
    ```sql
    INSERT INTO llm_traces (
-       llm_trace_id, job_id, provider, operation_type,
-       request, response, latency_ms, created_at, updated_at
+       llm_trace_id, job_id, provider, llm_model_id, operation_type,
+       request, response, latency_ms,
+       prompt_tokens, completion_tokens, total_tokens, token_usage,
+       created_at, updated_at
    ) VALUES (
-       :llm_trace_id, :job_id, 'gpt', 'kor_to_eng',
+       :llm_trace_id, :job_id, 'gpt', :llm_model_id, 'kor_to_eng',
        CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
+       :prompt_tokens, :completion_tokens, :total_tokens, CAST(:token_usage AS jsonb),
        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
    )
    ```
+   - **LLM 모델 ID**: `llm_models` 테이블에서 사용한 모델 조회 (선택적, NULL 허용)
+   - **토큰 정보 추출**: GPT API 응답에서 `token_usage` 추출
+     - `prompt_tokens`: `token_usage.prompt_tokens`
+     - `completion_tokens`: `token_usage.completion_tokens`
+     - `total_tokens`: `token_usage.total_tokens`
+     - `token_usage`: 원본 JSON 객체
 4. `txt_ad_copy_generations` 테이블에 레코드 생성:
    ```sql
    INSERT INTO txt_ad_copy_generations (
@@ -158,17 +198,26 @@ WHERE j.job_id = :job_id
 3. GPT API 호출: 영어 광고문구 생성
    - 입력: `desc_eng`, `tone_style` 정보
    - 출력: 영어 광고문구
-4. `llm_traces` 테이블에 기록:
+4. GPT API 호출 후 토큰 사용량 추출 및 `llm_traces` 테이블에 기록:
    ```sql
    INSERT INTO llm_traces (
-       llm_trace_id, job_id, provider, operation_type,
-       request, response, latency_ms, created_at, updated_at
+       llm_trace_id, job_id, provider, llm_model_id, operation_type,
+       request, response, latency_ms,
+       prompt_tokens, completion_tokens, total_tokens, token_usage,
+       created_at, updated_at
    ) VALUES (
-       :llm_trace_id, :job_id, 'gpt', 'ad_copy_gen',
+       :llm_trace_id, :job_id, 'gpt', :llm_model_id, 'ad_copy_gen',
        CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
+       :prompt_tokens, :completion_tokens, :total_tokens, CAST(:token_usage AS jsonb),
        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
    )
    ```
+   - **LLM 모델 ID**: `llm_models` 테이블에서 사용한 모델 조회 (선택적, NULL 허용)
+   - **토큰 정보 추출**: GPT API 응답에서 `token_usage` 추출
+     - `prompt_tokens`: `token_usage.prompt_tokens`
+     - `completion_tokens`: `token_usage.completion_tokens`
+     - `total_tokens`: `token_usage.total_tokens`
+     - `token_usage`: 원본 JSON 객체
 5. `txt_ad_copy_generations` 테이블에 레코드 생성/업데이트:
    ```sql
    INSERT INTO txt_ad_copy_generations (
@@ -222,17 +271,26 @@ WHERE j.job_id = :job_id
 **처리 과정:**
 1. `txt_ad_copy_generations` 테이블에서 `ad_copy_eng` 조회 (generation_stage='ad_copy_eng')
 2. GPT API 호출: 영어 광고문구 → 한글 광고문구 변환
-3. `llm_traces` 테이블에 기록:
+3. GPT API 호출 후 토큰 사용량 추출 및 `llm_traces` 테이블에 기록:
    ```sql
    INSERT INTO llm_traces (
-       llm_trace_id, job_id, provider, operation_type,
-       request, response, latency_ms, created_at, updated_at
+       llm_trace_id, job_id, provider, llm_model_id, operation_type,
+       request, response, latency_ms,
+       prompt_tokens, completion_tokens, total_tokens, token_usage,
+       created_at, updated_at
    ) VALUES (
-       :llm_trace_id, :job_id, 'gpt', 'ad_copy_kor',
+       :llm_trace_id, :job_id, 'gpt', :llm_model_id, 'ad_copy_kor',
        CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
+       :prompt_tokens, :completion_tokens, :total_tokens, CAST(:token_usage AS jsonb),
        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
    )
    ```
+   - **LLM 모델 ID**: `llm_models` 테이블에서 사용한 모델 조회 (선택적, NULL 허용)
+   - **토큰 정보 추출**: GPT API 응답에서 `token_usage` 추출
+     - `prompt_tokens`: `token_usage.prompt_tokens`
+     - `completion_tokens`: `token_usage.completion_tokens`
+     - `total_tokens`: `token_usage.total_tokens`
+     - `token_usage`: 원본 JSON 객체
 4. `txt_ad_copy_generations` 테이블에 레코드 생성:
    ```sql
    INSERT INTO txt_ad_copy_generations (
@@ -285,9 +343,14 @@ WHERE j.job_id = :job_id
 - [ ] 에러 처리 및 재시도 로직
 
 ### 3. Trace 관리
+- [ ] `llm_models` 테이블에서 사용할 모델 조회 (선택적)
 - [ ] `llm_traces` 테이블에 요청/응답 저장
+- [ ] `llm_model_id` 저장 (사용한 모델이 있는 경우)
 - [ ] `latency_ms` 측정 및 저장
 - [ ] `operation_type` 올바르게 설정
+- [ ] **토큰 사용량 정보 저장** (GPT API 응답에서 추출):
+  - `prompt_tokens`, `completion_tokens`, `total_tokens` 저장
+  - `token_usage` JSONB 원본 저장
 
 ### 4. 데이터 흐름
 - [ ] `kor_to_eng` 완료 후 `ad_copy_eng` 자동 실행 여부 확인
