@@ -230,3 +230,109 @@ Requirements:
         logger.error(f"❌ GPT API 호출 중 오류: {e}")
         raise
 
+
+def translate_eng_to_kor(ad_copy_eng: str) -> Dict[str, Any]:
+    """
+    GPT를 사용하여 영어 광고문구를 한글로 변환
+    
+    Args:
+        ad_copy_eng: 영어 광고문구
+    
+    Returns:
+        Dict[str, Any]: {
+            "ad_copy_kor": 한글 광고문구,
+            "prompt_used": 사용된 프롬프트,
+            "latency_ms": API 호출 소요 시간 (밀리초),
+            "token_usage": 토큰 사용량 정보,
+            "gpt_response_raw": GPT API 원본 응답 (JSONB 형식)
+        }
+    """
+    try:
+        client = get_gpt_client()
+        
+        # 프롬프트 구성
+        system_prompt = """You are an expert translator specializing in translating English ad copy to Korean.
+Your task is to translate English advertising copy into natural, engaging Korean that:
+1. Maintains the original meaning and intent
+2. Sounds natural and authentic in Korean
+3. Preserves the marketing tone and style
+4. Is appropriate for Korean audiences
+5. Keeps the same length and impact as the original
+
+Return only the Korean translation without any additional explanation or formatting."""
+        
+        user_prompt = f"""Translate the following English ad copy to Korean:
+
+{ad_copy_eng}
+
+Please provide only the Korean translation, maintaining the original tone and style."""
+
+        # GPT API 호출 (latency 측정)
+        start_time = time.time()
+        response = client.chat.completions.create(
+            model=GPT_MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=GPT_MAX_TOKENS,
+            temperature=0.3,  # 번역은 일관성을 위해 낮은 temperature 사용
+        )
+        latency_ms = (time.time() - start_time) * 1000  # 밀리초로 변환
+        
+        # 응답 파싱
+        response_text = response.choices[0].message.content.strip()
+        ad_copy_kor = response_text
+        
+        # 프롬프트 구성 (디버깅용)
+        prompt_used = f"System: {system_prompt}\n\nUser: {user_prompt}"
+        
+        # 토큰 사용량 추출
+        token_usage = None
+        if hasattr(response, 'usage') and response.usage:
+            token_usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            }
+        
+        # GPT API 원본 응답 (JSONB 형식으로 저장 가능하도록 dict로 변환)
+        gpt_response_raw = None
+        try:
+            # OpenAI 응답 객체를 dict로 변환
+            gpt_response_raw = {
+                "id": response.id,
+                "object": response.object,
+                "created": response.created,
+                "model": response.model,
+                "choices": [
+                    {
+                        "index": choice.index,
+                        "message": {
+                            "role": choice.message.role,
+                            "content": choice.message.content
+                        },
+                        "finish_reason": choice.finish_reason
+                    }
+                    for choice in response.choices
+                ],
+                "usage": token_usage
+            }
+        except Exception as e:
+            logger.warning(f"GPT 응답 원본 저장 중 오류: {e}")
+        
+        logger.info(f"✓ 영어 → 한글 변환 완료 (latency: {latency_ms:.2f}ms)")
+        logger.debug(f"변환된 글 길이: {len(ad_copy_kor)}자")
+        
+        return {
+            "ad_copy_kor": ad_copy_kor,
+            "prompt_used": prompt_used,
+            "latency_ms": latency_ms,
+            "token_usage": token_usage,
+            "gpt_response_raw": gpt_response_raw
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ GPT API 호출 중 오류: {e}")
+        raise
+

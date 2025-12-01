@@ -72,6 +72,21 @@ PIPELINE_STAGES = {
         'method': 'POST',
         'needs_overlay_id': True  # IoU는 overlay_id가 필요
     },
+    # 텍스트 생성 단계 (Job 레벨)
+    ('iou_eval', 'done'): {
+        'next_step': 'ad_copy_gen_kor',
+        'api_endpoint': '/api/yh/gpt/eng-to-kor',
+        'method': 'POST',
+        'is_job_level': True,  # Job 레벨 단계 (variant별 실행 아님)
+        'needs_overlay_id': False
+    },
+    ('ad_copy_gen_kor', 'done'): {
+        'next_step': 'instagram_feed_gen',
+        'api_endpoint': '/api/yh/instagram/feed',
+        'method': 'POST',
+        'is_job_level': True,  # Job 레벨 단계 (variant별 실행 아님)
+        'needs_overlay_id': False
+    },
 }
 
 async def trigger_next_pipeline_stage(

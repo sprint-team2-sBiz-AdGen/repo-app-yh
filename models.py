@@ -271,12 +271,9 @@ class FullEvalOut(BaseModel):
 
 class InstagramFeedIn(BaseModel):
     """인스타그램 피드 글 생성 요청 모델"""
-    tenant_id: str
-    refined_ad_copy_eng: str  # 조정된 광고문구 (영어)
-    tone_style: str  # Tone + Style
-    product_description: str  # Describe Product
-    store_information: str  # Store Information
-    gpt_prompt: str  # GPT 프롬프트
+    job_id: str  # 필수: Job ID
+    tenant_id: str  # 필수: Tenant ID
+    # 나머지 필드는 job_id를 통해 DB에서 자동 조회
 
 
 class InstagramFeedOut(BaseModel):
@@ -287,4 +284,19 @@ class InstagramFeedOut(BaseModel):
     hashtags: str  # 해시태그 (예: "#태그1 #태그2 #태그3")
     prompt_used: str  # 사용된 프롬프트
     generated_at: str  # 생성 시간
+
+
+class EngToKorIn(BaseModel):
+    """영어 → 한글 변환 요청 모델"""
+    job_id: str  # 필수: Job ID
+    tenant_id: str  # 필수: Tenant ID
+
+
+class EngToKorOut(BaseModel):
+    """영어 → 한글 변환 응답 모델"""
+    job_id: str  # UUID 문자열
+    llm_trace_id: str  # UUID 문자열
+    ad_copy_gen_id: str  # UUID 문자열
+    ad_copy_kor: str  # 한글 광고문구
+    status: str  # 'done' 또는 'failed'
 

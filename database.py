@@ -226,6 +226,41 @@ class LLMModel(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class LLMTrace(Base):
+    """LLM Traces 데이터베이스 모델"""
+    __tablename__ = "llm_traces"
+    
+    llm_trace_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=True)
+    provider = Column(String(255), nullable=True)  # 'gpt', 'anthropic', etc.
+    tone_style_id = Column(UUID(as_uuid=True), ForeignKey("tone_styles.tone_style_id"), nullable=True)
+    enhanced_img_id = Column(UUID(as_uuid=True), ForeignKey("image_assets.image_asset_id"), nullable=True)
+    prompt_id = Column(UUID(as_uuid=True), nullable=True)
+    operation_type = Column(String(255), nullable=True)  # 'translate', 'prompt', 'ad_copy_gen', 'eng_to_kor', 'feed_gen'
+    request = Column(JSONB, nullable=True)
+    response = Column(JSONB, nullable=True)
+    latency_ms = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class TxtAdCopyGeneration(Base):
+    """Text Ad Copy Generations 데이터베이스 모델"""
+    __tablename__ = "txt_ad_copy_generations"
+    
+    ad_copy_gen_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=False)  # FK: Job과 연결
+    llm_trace_id = Column(UUID(as_uuid=True), ForeignKey("llm_traces.llm_trace_id"), nullable=True)  # FK: GPT API 호출 Trace 참조
+    generation_stage = Column(String(255), nullable=False)  # 'kor_to_eng', 'ad_copy_eng', 'refined_ad_copy', 'eng_to_kor'
+    ad_copy_kor = Column(Text, nullable=True)  # 한글 광고문구 (최종, eng_to_kor 단계에서 생성)
+    ad_copy_eng = Column(Text, nullable=True)  # 영어 광고문구 (kor_to_eng, ad_copy_eng 단계에서 생성)
+    refined_ad_copy_eng = Column(Text, nullable=True)  # 조정된 영어 광고문구 (refined_ad_copy 단계에서 생성, 선택적)
+    status = Column(String(50), default='queued')  # 'queued', 'running', 'done', 'failed'
+    pk = Column(Integer, autoincrement=True, nullable=True)  # SERIAL
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class InstagramFeed(Base):
     """Instagram Feeds 데이터베이스 모델"""
     __tablename__ = "instagram_feeds"
@@ -234,10 +269,12 @@ class InstagramFeed(Base):
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=True)  # 파이프라인과 연결 시 사용
     overlay_id = Column(UUID(as_uuid=True), ForeignKey("overlay_layouts.overlay_id"), nullable=True)  # 오버레이 결과와 연결 시 사용
     llm_model_id = Column(UUID(as_uuid=True), ForeignKey("llm_models.llm_model_id"), nullable=True)  # 사용된 LLM 모델
+    llm_trace_id = Column(UUID(as_uuid=True), ForeignKey("llm_traces.llm_trace_id"), nullable=True)  # FK: 인스타그램 피드글 생성 GPT API 호출 Trace 참조
     tenant_id = Column(String(255), nullable=False)  # 테넌트 ID
     
     # 입력 데이터 (요청 시 받은 정보)
     refined_ad_copy_eng = Column(Text, nullable=False)  # 조정된 광고문구 (영어)
+    ad_copy_kor = Column(Text, nullable=True)  # 한글 광고문구 (GPT Eng→Kor 변환 결과, txt_ad_copy_generations에서 조회)
     tone_style = Column(Text, nullable=False)  # 톤 & 스타일
     product_description = Column(Text, nullable=False)  # 제품 설명
     store_information = Column(Text, nullable=False)  # 스토어 정보

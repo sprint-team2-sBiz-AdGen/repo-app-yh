@@ -148,11 +148,40 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         asset_url = image_asset.image_url
         logger.info(f"Found image asset from job_variant: {image_asset_id}, URL: {asset_url}")
         
-        # job_inputs에서 광고 텍스트 가져오기 (요청에 없으면)
-        job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
-        ad_copy_text = body.ad_copy_text if body.ad_copy_text else (job_input.desc_eng if job_input else None)
+        # 광고문구 조회 (우선순위: body.ad_copy_text → txt_ad_copy_generations → job_inputs.desc_eng)
+        ad_copy_text = None
+        
+        # 1순위: 요청에 ad_copy_text가 있으면 사용
+        if body.ad_copy_text:
+            ad_copy_text = body.ad_copy_text
+            logger.info(f"Using ad_copy_text from request body")
+        else:
+            # 2순위: txt_ad_copy_generations 테이블에서 ad_copy_eng 조회
+            ad_copy_gen = db.execute(
+                text("""
+                    SELECT ad_copy_eng
+                    FROM txt_ad_copy_generations
+                    WHERE job_id = :job_id
+                      AND generation_stage = 'ad_copy_eng'
+                      AND status = 'done'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """),
+                {"job_id": job_id}
+            ).first()
+            
+            if ad_copy_gen and ad_copy_gen.ad_copy_eng:
+                ad_copy_text = ad_copy_gen.ad_copy_eng
+                logger.info(f"Using ad_copy_eng from txt_ad_copy_generations: job_id={job_id}")
+            else:
+                # 3순위: job_inputs에서 desc_eng 조회 (하위 호환성)
+                job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
+                if job_input and job_input.desc_eng:
+                    ad_copy_text = job_input.desc_eng
+                    logger.info(f"Using desc_eng from job_inputs: job_id={job_id}")
+        
         if not ad_copy_text:
-            logger.warning(f"Ad copy text not found in request or job_input: job_id={job_id}")
+            logger.warning(f"Ad copy text not found in request, txt_ad_copy_generations, or job_input: job_id={job_id}")
         
         # Step 2: 이미지 로드
         try:
