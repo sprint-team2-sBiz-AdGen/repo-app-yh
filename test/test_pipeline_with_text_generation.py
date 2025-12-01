@@ -233,6 +233,13 @@ def create_test_job_with_js_data(
         
         db.commit()
         
+        # 전 단계 완료 조건 검증
+        print("\n" + "=" * 60)
+        print("전 단계 완료 조건 검증")
+        print("=" * 60)
+        if not verify_pre_stage_completion(db, job_id):
+            raise ValueError("전 단계 완료 조건을 만족하지 않습니다. JS 파트 또는 YE 파트 데이터가 부족합니다.")
+        
         print("\n" + "=" * 60)
         print("✅ Job 생성 완료")
         print("=" * 60)
@@ -241,6 +248,8 @@ def create_test_job_with_js_data(
         print(f"Variants: {len(variant_ids)}개")
         print(f"JS 파트 데이터: kor_to_eng, ad_copy_eng 생성 완료")
         print("=" * 60)
+        
+        logger.info(f"Job 생성 완료: job_id={job_id}, variants={len(variant_ids)}개")
         
         return {
             "job_id": str(job_id),
@@ -253,12 +262,69 @@ def create_test_job_with_js_data(
             "ad_copy_eng": ad_copy_eng
         }
         
+    except ValueError as e:
+        # 전 단계 완료 조건 불만족
+        db.rollback()
+        logger.error(f"전 단계 완료 조건 검증 실패: {e}", exc_info=True)
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Job 생성 중 오류: {e}", exc_info=True)
         raise
     finally:
         db.close()
+
+
+def verify_pre_stage_completion(db: Session, job_id: str) -> bool:
+    """전 단계 완료 조건 검증 (JS 파트 + YE 파트)"""
+    logger.info(f"전 단계 완료 조건 검증 시작: job_id={job_id}")
+    
+    # 1. JS 파트 검증
+    js_count = db.execute(text("""
+        SELECT COUNT(*) 
+        FROM txt_ad_copy_generations
+        WHERE job_id = :job_id
+          AND generation_stage IN ('kor_to_eng', 'ad_copy_eng')
+          AND status = 'done'
+    """), {"job_id": job_id}).scalar()
+    
+    js_part_complete = js_count >= 2
+    
+    # 2. YE 파트 검증
+    ye_count = db.execute(text("""
+        SELECT COUNT(*)
+        FROM jobs_variants
+        WHERE job_id = :job_id
+          AND status = 'done'
+          AND current_step = 'img_gen'
+          AND img_asset_id IS NOT NULL
+    """), {"job_id": job_id}).scalar()
+    
+    ye_part_complete = ye_count > 0
+    
+    # 검증 결과 출력
+    if not js_part_complete:
+        logger.warning(f"⚠️ JS 파트 데이터 부족: {js_count}/2 (필요: kor_to_eng, ad_copy_eng)")
+        print(f"⚠️ JS 파트 데이터 부족: {js_count}/2 (필요: kor_to_eng, ad_copy_eng)")
+    else:
+        logger.info(f"✓ JS 파트 완료: {js_count}/2")
+        print(f"✓ JS 파트 완료: {js_count}/2")
+    
+    if not ye_part_complete:
+        logger.warning(f"⚠️ YE 파트 데이터 없음: {ye_count}개 variants")
+        print(f"⚠️ YE 파트 데이터 없음: {ye_count}개 variants")
+    else:
+        logger.info(f"✓ YE 파트 완료: {ye_count}개 variants")
+        print(f"✓ YE 파트 완료: {ye_count}개 variants")
+    
+    if js_part_complete and ye_part_complete:
+        logger.info(f"✅ 전 단계 완료 조건 모두 만족: JS 파트 ✓, YE 파트 ✓")
+        print(f"✅ 전 단계 완료 조건 모두 만족: JS 파트 ✓, YE 파트 ✓")
+        return True
+    else:
+        logger.error(f"❌ 전 단계 완료 조건 불만족: JS 파트={js_part_complete}, YE 파트={ye_part_complete}")
+        print(f"❌ 전 단계 완료 조건 불만족: JS 파트={js_part_complete}, YE 파트={ye_part_complete}")
+        return False
 
 
 def check_job_status(db: Session, job_id: str):
@@ -348,8 +414,53 @@ def check_instagram_feeds(db: Session, job_id: str):
     return rows
 
 
+def print_table_status(db: Session, job_id: str, step_name: str = ""):
+    """jobs와 jobs_variants 테이블 상태 출력 (test_job_variants_pipeline.py 구조 참고)"""
+    print(f"\n{'=' * 60}")
+    if step_name:
+        print(f"[{step_name}] 테이블 상태")
+    else:
+        print("테이블 상태")
+    print(f"{'=' * 60}")
+    
+    # jobs 테이블 상태
+    job_status = check_job_status(db, job_id)
+    if job_status:
+        print(f"📋 jobs 테이블:")
+        print(f"   - job_id: {job_id[:8]}...")
+        print(f"   - status: {job_status['status']}")
+        print(f"   - current_step: {job_status['current_step']}")
+        print(f"   - retry_count: {job_status.get('retry_count', 0)}")
+    else:
+        print(f"📋 jobs 테이블: Job을 찾을 수 없습니다")
+    
+    # jobs_variants 테이블 상태
+    variants = db.execute(text("""
+        SELECT job_variants_id, creation_order, status, current_step, updated_at
+        FROM jobs_variants
+        WHERE job_id = :job_id
+        ORDER BY creation_order
+    """), {"job_id": job_id}).fetchall()
+    
+    print(f"\n📦 jobs_variants 테이블 (총 {len(variants)}개):")
+    for variant in variants:
+        print(f"   Variant {variant[1]}:")
+        print(f"     - job_variants_id: {str(variant[0])[:8]}...")
+        print(f"     - status: {variant[2]}")
+        print(f"     - current_step: {variant[3]}")
+        print(f"     - updated_at: {variant[4]}")
+    
+    # txt_ad_copy_generations 상태
+    check_txt_ad_copy_generations(db, job_id)
+    
+    # instagram_feeds 상태
+    check_instagram_feeds(db, job_id)
+    
+    print()
+
+
 def monitor_pipeline_progress(job_id: str, tenant_id: str, max_wait_minutes: int = 30):
-    """파이프라인 진행 상황 모니터링"""
+    """파이프라인 진행 상황 모니터링 (test_job_variants_pipeline.py 구조 참고)"""
     print("\n" + "=" * 60)
     print("파이프라인 진행 상황 모니터링")
     print("=" * 60)
@@ -357,22 +468,34 @@ def monitor_pipeline_progress(job_id: str, tenant_id: str, max_wait_minutes: int
     print(f"최대 대기 시간: {max_wait_minutes}분")
     print("=" * 60)
     
+    logger.info(f"파이프라인 모니터링 시작: job_id={job_id}, max_wait={max_wait_minutes}분")
+    
     db = SessionLocal()
     start_time = time.time()
     max_wait_seconds = max_wait_minutes * 60
-    check_interval = 10  # 10초마다 확인
-    
-    last_step = None
-    last_status = None
+    check_interval = 30  # 30초마다 상태 확인
     
     try:
+        # 트리거가 감지될 시간 대기 (LLaVA 모델 로딩 시간 고려)
+        print("\n⏳ 파이프라인 실행 대기 중... (트리거가 감지되면 자동으로 시작됩니다)")
+        print("   💡 LLaVA 모델을 GPU에 로드하는 데 시간이 걸릴 수 있습니다...")
+        logger.info("트리거 감지 대기 중 (5초)...")
+        time.sleep(5)
+        
+        last_check_time = 0
+        
         while True:
             elapsed = time.time() - start_time
             if elapsed > max_wait_seconds:
                 print(f"\n⏰ 최대 대기 시간 초과 ({max_wait_minutes}분)")
                 break
             
-            # Job 상태 확인
+            # 주기적으로 상태 확인
+            if elapsed - last_check_time >= check_interval:
+                print_table_status(db, job_id, f"진행 중 ({int(elapsed)}초 경과)")
+                last_check_time = elapsed
+            
+            # 완료 조건 확인
             job_status = check_job_status(db, job_id)
             if not job_status:
                 print("❌ Job을 찾을 수 없습니다")
@@ -381,97 +504,128 @@ def monitor_pipeline_progress(job_id: str, tenant_id: str, max_wait_minutes: int
             current_step = job_status["current_step"]
             status = job_status["status"]
             
-            # 상태 변화 감지
-            if current_step != last_step or status != last_status:
-                print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 상태 변화 감지:")
-                print(f"  Step: {last_step} → {current_step}")
-                print(f"  Status: {last_status} → {status}")
-                last_step = current_step
-                last_status = status
-            
-            # 완료 확인
+            # 완료 확인: instagram_feed_gen 단계 완료
             if status == 'done' and current_step == 'instagram_feed_gen':
+                elapsed_total = int(time.time() - start_time)
                 print("\n✅ 파이프라인 완료!")
                 print("=" * 60)
-                check_variants_status(db, job_id)
-                check_txt_ad_copy_generations(db, job_id)
-                check_instagram_feeds(db, job_id)
+                logger.info(f"파이프라인 완료: job_id={job_id}, 소요 시간={elapsed_total}초")
+                print_table_status(db, job_id, "최종 상태")
                 break
             
             # 실패 확인
             if status == 'failed':
+                elapsed_total = int(time.time() - start_time)
                 print("\n❌ 파이프라인 실패!")
                 print("=" * 60)
-                check_variants_status(db, job_id)
-                check_txt_ad_copy_generations(db, job_id)
+                logger.error(f"파이프라인 실패: job_id={job_id}, current_step={current_step}, 소요 시간={elapsed_total}초")
+                print_table_status(db, job_id, "실패 상태")
                 break
             
-            # 진행 중
-            elapsed_min = int(elapsed / 60)
-            elapsed_sec = int(elapsed % 60)
-            print(f"\r[{elapsed_min:02d}:{elapsed_sec:02d}] 진행 중... {current_step} ({status})", end="", flush=True)
+            # Variants 완료 확인 (iou_eval 단계까지)
+            variants = db.execute(text("""
+                SELECT job_variants_id, creation_order, status, current_step
+                FROM jobs_variants
+                WHERE job_id = :job_id
+                ORDER BY creation_order
+            """), {"job_id": job_id}).fetchall()
             
-            time.sleep(check_interval)
+            all_variants_done = True
+            any_failed = False
+            
+            for variant in variants:
+                if not (variant[3] == "iou_eval" and variant[2] == "done"):
+                    all_variants_done = False
+                if variant[2] == "failed":
+                    any_failed = True
+            
+            # 모든 variants가 iou_eval 완료되었는지 확인
+            if all_variants_done and current_step != "instagram_feed_gen":
+                # iou_eval 완료 후 텍스트 생성 단계로 진행 중
+                if current_step in ["ad_copy_gen_kor", "instagram_feed_gen"]:
+                    # 텍스트 생성 단계 진행 중
+                    pass
+                elif current_step == "iou_eval":
+                    # 아직 텍스트 생성 단계로 넘어가지 않음 (트리거 대기 중)
+                    pass
+            
+            if any_failed:
+                print(f"\n⚠️  일부 Variants 실패")
+                logger.warning(f"일부 Variants 실패: job_id={job_id}")
+                break
+            
+            time.sleep(5)  # 5초마다 확인
         
-        print("\n")
+        # 최종 상태 출력
+        elapsed_total = int(time.time() - start_time)
+        print("\n" + "=" * 60)
+        print("최종 상태")
+        print("=" * 60)
+        logger.info(f"파이프라인 모니터링 종료: job_id={job_id}, 총 소요 시간={elapsed_total}초")
+        print_table_status(db, job_id, "최종 상태")
         
+    except Exception as e:
+        logger.error(f"파이프라인 모니터링 중 오류: {e}", exc_info=True)
+        raise
     finally:
         db.close()
 
 
 def trigger_pipeline_start(job_id: str, tenant_id: str, variant_ids: list):
-    """파이프라인 시작 트리거 (vlm_analyze부터 시작)"""
+    """파이프라인 시작 트리거 (test_job_variants_pipeline.py 구조 참고)"""
     print("\n" + "=" * 60)
-    print("파이프라인 시작 트리거")
+    print("트리거 발동 (상태 업데이트)")
     print("=" * 60)
     
-    # Job 상태를 img_gen에서 vlm_analyze로 변경하여 트리거
+    logger.info(f"파이프라인 트리거 시작: job_id={job_id}, variants={len(variant_ids)}개")
+    
     db = SessionLocal()
     try:
-        # Job 상태 업데이트 (트리거 발동)
-        db.execute(text("""
-            UPDATE jobs
-            SET status = 'running',
-                current_step = 'img_gen',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE job_id = :job_id
-        """), {"job_id": job_id})
+        # 전 단계 완료 조건 재검증 (안전장치)
+        if not verify_pre_stage_completion(db, job_id):
+            raise ValueError("전 단계 완료 조건을 만족하지 않습니다. 트리거를 발동할 수 없습니다.")
         
-        # Variants 상태 업데이트
-        for variant_id in variant_ids:
-            db.execute(text("""
-                UPDATE jobs_variants
-                SET status = 'queued',
-                    current_step = 'vlm_analyze',
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE job_variants_id = :variant_id
-            """), {"variant_id": variant_id})
+        for idx, variant_id in enumerate(variant_ids, 1):
+            try:
+                # 상태를 다시 업데이트하여 트리거 발동
+                db.execute(text("""
+                    UPDATE jobs_variants 
+                    SET status = 'running',
+                        current_step = 'img_gen',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_variants_id = :variant_id
+                """), {"variant_id": variant_id})
+                db.commit()
+                logger.debug(f"Variant {idx}/{len(variant_ids)}: running 상태로 변경")
+                
+                time.sleep(0.2)  # 트리거 발동 대기
+                
+                db.execute(text("""
+                    UPDATE jobs_variants 
+                    SET status = 'done',
+                        current_step = 'img_gen',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_variants_id = :variant_id
+                """), {"variant_id": variant_id})
+                db.commit()
+                logger.debug(f"Variant {idx}/{len(variant_ids)}: done 상태로 변경 (트리거 발동)")
+                
+            except Exception as e:
+                logger.error(f"Variant {idx}/{len(variant_ids)} 트리거 발동 실패: {e}", exc_info=True)
+                db.rollback()
+                raise
         
-        db.commit()
-        print(f"✓ Job 및 Variants 상태 업데이트 완료")
-        print(f"  - Job: img_gen → vlm_analyze 트리거 준비")
-        print(f"  - Variants: {len(variant_ids)}개 queued 상태로 변경")
+        print(f"✓ 총 {len(variant_ids)}개 Variants 트리거 발동 완료")
+        logger.info(f"파이프라인 트리거 완료: {len(variant_ids)}개 variants")
         
-        # NOTIFY 직접 발행 (트리거 강제 실행)
-        print(f"\n🔔 NOTIFY 발행 중...")
-        db.execute(text("""
-            SELECT pg_notify(
-                'job_state_changed',
-                json_build_object(
-                    'job_id', :job_id::text,
-                    'current_step', 'img_gen',
-                    'status', 'done',
-                    'tenant_id', :tenant_id,
-                    'updated_at', NOW()
-                )::text
-            )
-        """), {
-            "job_id": job_id,
-            "tenant_id": tenant_id
-        })
-        db.commit()
-        print(f"✓ NOTIFY 발행 완료")
+        # 트리거 발동 후 상태 확인
+        print_table_status(db, job_id, "트리거 발동 후")
         
+    except ValueError as e:
+        # 전 단계 완료 조건 불만족
+        db.rollback()
+        logger.error(f"전 단계 완료 조건 검증 실패: {e}", exc_info=True)
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"파이프라인 트리거 중 오류: {e}", exc_info=True)
@@ -495,7 +649,15 @@ def main():
     args = parser.parse_args()
     
     try:
+        logger.info("=" * 60)
+        logger.info("YH 파트 파이프라인 테스트 시작")
+        logger.info(f"  - Tenant ID: {args.tenant_id}")
+        logger.info(f"  - Variants: {args.variants}개")
+        logger.info(f"  - Max Wait: {args.max_wait}분")
+        logger.info("=" * 60)
+        
         # 1. Job 생성 및 JS 파트 데이터 생성
+        logger.info("Step 1: Job 생성 및 전 단계 데이터 준비 시작")
         job_data = create_test_job_with_js_data(
             tenant_id=args.tenant_id,
             image_path=args.image_path,
@@ -507,13 +669,20 @@ def main():
         tenant_id = job_data["tenant_id"]
         variant_ids = job_data["variant_ids"]
         
-        # 2. 파이프라인 시작 트리거
+        # 2. 트리거 발동을 위해 모든 variant 상태를 업데이트
+        logger.info("Step 2: 파이프라인 트리거 발동 시작")
         trigger_pipeline_start(job_id, tenant_id, variant_ids)
         
-        # 3. 진행 상황 모니터링 (옵션)
+        # 3. 파이프라인 진행 상황 모니터링 (옵션)
         if args.wait:
+            logger.info("Step 3: 파이프라인 모니터링 시작")
+            print("\n⏳ 파이프라인 실행 대기 중... (트리거가 감지되면 자동으로 시작됩니다)")
+            print("   💡 LLaVA 모델을 GPU에 로드하는 데 시간이 걸릴 수 있습니다...")
+            time.sleep(5)  # 트리거가 감지될 시간 대기
+            
             monitor_pipeline_progress(job_id, tenant_id, max_wait_minutes=args.max_wait)
         else:
+            logger.info("Step 3: 파이프라인 모니터링 스킵 (--wait 옵션 없음)")
             print("\n💡 파이프라인 모니터링을 시작하려면 --wait 옵션을 사용하세요")
             print(f"   python {__file__} --wait --job-id {job_id}")
         
@@ -525,8 +694,19 @@ def main():
         print(f"API Base URL: {API_BASE_URL}")
         print("=" * 60)
         
+        logger.info("=" * 60)
+        logger.info("YH 파트 파이프라인 테스트 완료")
+        logger.info(f"  - Job ID: {job_id}")
+        logger.info("=" * 60)
+        
+    except ValueError as e:
+        # 전 단계 완료 조건 불만족 등 명시적 오류
+        logger.error(f"테스트 실행 중 검증 실패: {e}", exc_info=True)
+        print(f"\n❌ 검증 실패: {e}")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"테스트 실행 중 오류: {e}", exc_info=True)
+        print(f"\n❌ 오류 발생: {e}")
         sys.exit(1)
 
 
