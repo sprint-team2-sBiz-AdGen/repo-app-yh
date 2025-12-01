@@ -554,7 +554,9 @@ async def _get_text_and_proposal_from_job_variant(job_variants_id: str, job_id: 
     """
     job_variants_id로부터 text와 proposal_id 조회
     
-    job → job_inputs에서 text(desc_eng) 조회
+    오버레이에 사용할 텍스트는 한글 광고문구(ad_copy_kor)를 사용합니다.
+    JS 파트에서 사용자 입력 한글 description → 영어 번역 → GPT로 한글 광고문구 생성한 것을 사용.
+    
     job_variants → img_asset_id → planner_proposals에서 최신 proposal_id 조회
     
     Args:
@@ -573,34 +575,31 @@ async def _get_text_and_proposal_from_job_variant(job_variants_id: str, job_id: 
     try:
         conn = await asyncpg.connect(asyncpg_url)
         try:
-            # 1. txt_ad_copy_generations에서 ad_copy_eng 조회 (우선순위)
+            # 1. txt_ad_copy_generations에서 ad_copy_kor 조회 (우선순위)
+            # JS 파트에서 생성한 한글 광고문구를 오버레이에 사용
             ad_copy_row = await conn.fetchrow(
                 """
-                SELECT ad_copy_eng, refined_ad_copy_eng
+                SELECT ad_copy_kor
                 FROM txt_ad_copy_generations
                 WHERE job_id = $1
-                  AND generation_stage IN ('ad_copy_eng', 'refined_ad_copy')
+                  AND generation_stage = 'ad_copy_kor'
                   AND status = 'done'
-                ORDER BY 
-                    CASE generation_stage
-                        WHEN 'refined_ad_copy' THEN 1
-                        WHEN 'ad_copy_eng' THEN 2
-                    END,
-                    created_at DESC
+                ORDER BY created_at DESC
                 LIMIT 1
                 """,
                 job_id
             )
             
             text = None
-            if ad_copy_row:
-                text = ad_copy_row['refined_ad_copy_eng'] or ad_copy_row['ad_copy_eng']
+            if ad_copy_row and ad_copy_row['ad_copy_kor']:
+                text = ad_copy_row['ad_copy_kor']
+                logger.info(f"한글 광고문구 조회 성공: job_id={job_id}, text_length={len(text)}")
             
-            # 2. txt_ad_copy_generations에서 찾지 못한 경우 job_inputs.desc_eng 조회 (fallback)
+            # 2. txt_ad_copy_generations에서 찾지 못한 경우 job_inputs.desc_kor 조회 (fallback)
             if not text:
                 text_row = await conn.fetchrow(
                     """
-                    SELECT ji.desc_eng
+                    SELECT ji.desc_kor
                     FROM jobs j
                     INNER JOIN job_inputs ji ON j.job_id = ji.job_id
                     WHERE j.job_id = $1
@@ -610,11 +609,12 @@ async def _get_text_and_proposal_from_job_variant(job_variants_id: str, job_id: 
                     tenant_id
                 )
                 
-                if text_row and text_row['desc_eng']:
-                    text = text_row['desc_eng']
+                if text_row and text_row['desc_kor']:
+                    text = text_row['desc_kor']
+                    logger.info(f"한글 설명 조회 성공 (fallback): job_id={job_id}, text_length={len(text)}")
             
             if not text:
-                logger.warning(f"text를 찾을 수 없음: job_variants_id={job_variants_id}, job_id={job_id}, tenant_id={tenant_id}")
+                logger.warning(f"한글 텍스트를 찾을 수 없음: job_variants_id={job_variants_id}, job_id={job_id}, tenant_id={tenant_id}")
                 return None
             
             # job_variants → img_asset_id → planner_proposals에서 최신 proposal_id 조회

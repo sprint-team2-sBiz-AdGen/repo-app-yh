@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """YH 파트 전체 파이프라인 테스트 (텍스트 생성 포함)
-- JS 파트 데이터 임의 생성 (kor_to_eng, ad_copy_eng)
+- JS 파트 데이터 임의 생성 (kor_to_eng, ad_copy_eng, ad_copy_kor)
+  * kor_to_eng: 사용자 입력 한글 description → 영어 번역
+  * ad_copy_eng: 영어 광고문구 생성
+  * ad_copy_kor: 한글 광고문구 생성 (오버레이에 사용)
 - YH 파트 파이프라인 테스트 (vlm_analyze → ... → iou_eval → eng_to_kor → instagram_feed)
+  * 오버레이에는 한글 광고문구(ad_copy_kor) 사용
+  * 피드글 생성에는 한글 광고문구를 이용하여 GPT로 한글 피드글 생성
 """
 import sys
 import os
@@ -24,6 +29,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import SessionLocal, ImageAsset, Job, JobInput, JobVariant
 from utils import save_asset, abs_from_url
+from fastapi import HTTPException
 from config import ASSETS_DIR
 import logging
 
@@ -59,18 +65,32 @@ def create_test_job_with_js_data(
         db.commit()
         print(f"✓ Tenant 확인/생성 완료: {tenant_id}")
         
-        # 2. 이미지 생성 또는 로드
+        # 2. 이미지 생성 또는 로드 (background_job_creator.py 방식 참고)
         print(f"\n[2/8] 이미지 준비 중...")
         if image_path and os.path.exists(image_path):
             image = Image.open(image_path)
             print(f"  - Image Path: {image_path}")
         else:
-            # 더미 이미지 생성
-            image = Image.new('RGB', (1024, 1024), color='lightblue')
-            draw = ImageDraw.Draw(image)
-            draw.rectangle([100, 100, 924, 924], fill='white', outline='black', width=5)
-            draw.text((400, 500), "Test Image", fill='black')
-            print(f"  - 더미 이미지 생성: 1024x1024")
+            # 기본 이미지 경로들 시도 (background_job_creator.py와 동일)
+            default_image_paths = [
+                project_root / "pipeline_test" / "pipeline_test_image9.jpg",
+                project_root / "pipeline_test" / "pipeline_test_image1.png",
+                project_root / "pipeline_test" / "ppipeline_test_image16.jpg",
+            ]
+            image = None
+            for img_path in default_image_paths:
+                if img_path.exists():
+                    image = Image.open(str(img_path))
+                    print(f"  - 실제 이미지 사용: {img_path}")
+                    break
+            
+            if image is None:
+                # 더미 이미지 생성 (fallback)
+                image = Image.new('RGB', (1024, 1024), color='lightblue')
+                draw = ImageDraw.Draw(image)
+                draw.rectangle([100, 100, 924, 924], fill='white', outline='black', width=5)
+                draw.text((400, 500), "Test Image", fill='black')
+                print(f"  - 더미 이미지 생성: 1024x1024 (실제 이미지 파일을 찾을 수 없음)")
         
         # ASSETS_DIR에 저장
         asset_meta = save_asset(tenant_id, "yh_pipeline_test", image, ".png")
@@ -164,7 +184,7 @@ def create_test_job_with_js_data(
         print(f"✓ Job Inputs 생성")
         print(f"  - desc_kor: {desc_kor}")
         
-        # 8. JS 파트 데이터 임의 생성 (kor_to_eng, ad_copy_eng)
+        # 8. JS 파트 데이터 임의 생성 (kor_to_eng, ad_copy_eng, ad_copy_kor)
         print(f"\n[7/8] JS 파트 데이터 임의 생성 중...")
         
         # kor_to_eng: 한국어 → 영어 변환 (임의)
@@ -207,6 +227,27 @@ def create_test_job_with_js_data(
         })
         print(f"✓ ad_copy_eng 생성: {ad_copy_eng[:50]}...")
         
+        # ad_copy_kor: 한글 광고문구 생성 (JS 파트에서 GPT로 생성, 오버레이에 사용)
+        # 사용자 입력 한글 description → 영어 번역 → GPT로 한글 광고문구 생성
+        ad_copy_kor = "매콤하고 고소한 맛이 조화롭게 어우러진 부대찌개를 경험해보세요! 정성껏 준비한 신선한 재료와 정통 레시피로 만든 이 요리는 여러분의 마음을 따뜻하게 하고 갈증을 해소해줄 것입니다. 오늘 저희를 방문해보세요!"
+        ad_copy_kor_gen_id = uuid.uuid4()
+        db.execute(text("""
+            INSERT INTO txt_ad_copy_generations (
+                ad_copy_gen_id, job_id, generation_stage,
+                ad_copy_kor, status,
+                created_at, updated_at
+            ) VALUES (
+                :ad_copy_gen_id, :job_id, 'ad_copy_kor',
+                :ad_copy_kor, 'done',
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+        """), {
+            "ad_copy_gen_id": ad_copy_kor_gen_id,
+            "job_id": job_id,
+            "ad_copy_kor": ad_copy_kor
+        })
+        print(f"✓ ad_copy_kor 생성: {ad_copy_kor[:50]}...")
+        
         # 9. jobs_variants 생성 (이미지 처리용)
         print(f"\n[8/8] Job Variants 생성 중...")
         variant_ids = []
@@ -246,7 +287,8 @@ def create_test_job_with_js_data(
         print(f"Job ID: {job_id}")
         print(f"Tenant ID: {tenant_id}")
         print(f"Variants: {len(variant_ids)}개")
-        print(f"JS 파트 데이터: kor_to_eng, ad_copy_eng 생성 완료")
+        print(f"JS 파트 데이터: kor_to_eng, ad_copy_eng, ad_copy_kor 생성 완료")
+        print(f"  - 오버레이 텍스트: 한글 광고문구(ad_copy_kor) 사용")
         print("=" * 60)
         
         logger.info(f"Job 생성 완료: job_id={job_id}, variants={len(variant_ids)}개")
@@ -259,7 +301,8 @@ def create_test_job_with_js_data(
             "asset_url": asset_url,
             "desc_kor": desc_kor,
             "desc_eng": desc_eng,
-            "ad_copy_eng": ad_copy_eng
+            "ad_copy_eng": ad_copy_eng,
+            "ad_copy_kor": ad_copy_kor
         }
         
     except ValueError as e:
@@ -279,16 +322,16 @@ def verify_pre_stage_completion(db: Session, job_id: str) -> bool:
     """전 단계 완료 조건 검증 (JS 파트 + YE 파트)"""
     logger.info(f"전 단계 완료 조건 검증 시작: job_id={job_id}")
     
-    # 1. JS 파트 검증
+    # 1. JS 파트 검증 (kor_to_eng, ad_copy_eng, ad_copy_kor)
     js_count = db.execute(text("""
         SELECT COUNT(*) 
         FROM txt_ad_copy_generations
         WHERE job_id = :job_id
-          AND generation_stage IN ('kor_to_eng', 'ad_copy_eng')
+          AND generation_stage IN ('kor_to_eng', 'ad_copy_eng', 'ad_copy_kor')
           AND status = 'done'
     """), {"job_id": job_id}).scalar()
     
-    js_part_complete = js_count >= 2
+    js_part_complete = js_count >= 3  # kor_to_eng, ad_copy_eng, ad_copy_kor
     
     # 2. YE 파트 검증
     ye_count = db.execute(text("""
@@ -304,11 +347,11 @@ def verify_pre_stage_completion(db: Session, job_id: str) -> bool:
     
     # 검증 결과 출력
     if not js_part_complete:
-        logger.warning(f"⚠️ JS 파트 데이터 부족: {js_count}/2 (필요: kor_to_eng, ad_copy_eng)")
-        print(f"⚠️ JS 파트 데이터 부족: {js_count}/2 (필요: kor_to_eng, ad_copy_eng)")
+        logger.warning(f"⚠️ JS 파트 데이터 부족: {js_count}/3 (필요: kor_to_eng, ad_copy_eng, ad_copy_kor)")
+        print(f"⚠️ JS 파트 데이터 부족: {js_count}/3 (필요: kor_to_eng, ad_copy_eng, ad_copy_kor)")
     else:
-        logger.info(f"✓ JS 파트 완료: {js_count}/2")
-        print(f"✓ JS 파트 완료: {js_count}/2")
+        logger.info(f"✓ JS 파트 완료: {js_count}/3")
+        print(f"✓ JS 파트 완료: {js_count}/3")
     
     if not ye_part_complete:
         logger.warning(f"⚠️ YE 파트 데이터 없음: {ye_count}개 variants")
@@ -452,16 +495,21 @@ def print_detailed_results(db: Session, job_id: str):
         
         if job_input:
             # 절대 경로 변환
-            if job_input[1] and job_input[1].startswith("/assets/"):
-                original_path = os.path.join(ASSETS_DIR, job_input[1][len("/assets/"):])
+            try:
+                if job_input[1] and job_input[1].startswith("/assets/"):
+                    original_path = abs_from_url(job_input[1])
+                    print(f"   - Image Asset ID: {job_input[0]}")
+                    print(f"   - Image URL: {job_input[1]}")
+                    print(f"   - 절대 경로: {original_path}")
+                    print(f"   - 파일 존재: {'✅' if os.path.exists(original_path) else '❌'}")
+                else:
+                    print(f"   - Image Asset ID: {job_input[0]}")
+                    print(f"   - Image URL: {job_input[1]}")
+                    print(f"   - 절대 경로: (URL 형식 오류)")
+            except (HTTPException, Exception) as e:
                 print(f"   - Image Asset ID: {job_input[0]}")
                 print(f"   - Image URL: {job_input[1]}")
-                print(f"   - 절대 경로: {original_path}")
-                print(f"   - 파일 존재: {'✅' if os.path.exists(original_path) else '❌'}")
-            else:
-                print(f"   - Image Asset ID: {job_input[0]}")
-                print(f"   - Image URL: {job_input[1]}")
-                print(f"   - 절대 경로: (URL 형식 오류)")
+                print(f"   - 절대 경로 변환 오류: {e}")
         else:
             print("   - 원본 이미지를 찾을 수 없습니다.")
         
@@ -497,16 +545,21 @@ def print_detailed_results(db: Session, job_id: str):
                 
                 if overlay_asset and overlay_asset[0]:
                     # 절대 경로 변환
-                    if overlay_asset[0].startswith("/assets/"):
-                        overlay_path = os.path.join(ASSETS_DIR, overlay_asset[0][len("/assets/"):])
+                    try:
+                        if overlay_asset[0].startswith("/assets/"):
+                            overlay_path = abs_from_url(overlay_asset[0])
+                            print(f"      - 최종 오버레이 이미지:")
+                            print(f"        * URL: {overlay_asset[0]}")
+                            print(f"        * 절대 경로: {overlay_path}")
+                            print(f"        * 파일 존재: {'✅' if os.path.exists(overlay_path) else '❌'}")
+                        else:
+                            print(f"      - 최종 오버레이 이미지:")
+                            print(f"        * URL: {overlay_asset[0]}")
+                            print(f"        * 절대 경로: (URL 형식 오류)")
+                    except (HTTPException, Exception) as e:
                         print(f"      - 최종 오버레이 이미지:")
                         print(f"        * URL: {overlay_asset[0]}")
-                        print(f"        * 절대 경로: {overlay_path}")
-                        print(f"        * 파일 존재: {'✅' if os.path.exists(overlay_path) else '❌'}")
-                    else:
-                        print(f"      - 최종 오버레이 이미지:")
-                        print(f"        * URL: {overlay_asset[0]}")
-                        print(f"        * 절대 경로: (URL 형식 오류)")
+                        print(f"        * 절대 경로 변환 오류: {e}")
             
             # overlay_layouts에서 render URL 확인 (fallback)
             if not overlaid_img_asset_id:
@@ -520,16 +573,21 @@ def print_detailed_results(db: Session, job_id: str):
                 
                 if overlay_layout and overlay_layout[0]:
                     # 절대 경로 변환
-                    if overlay_layout[0].startswith("/assets/"):
-                        render_path = os.path.join(ASSETS_DIR, overlay_layout[0][len("/assets/"):])
+                    try:
+                        if overlay_layout[0].startswith("/assets/"):
+                            render_path = abs_from_url(overlay_layout[0])
+                            print(f"      - 오버레이 렌더 이미지:")
+                            print(f"        * URL: {overlay_layout[0]}")
+                            print(f"        * 절대 경로: {render_path}")
+                            print(f"        * 파일 존재: {'✅' if os.path.exists(render_path) else '❌'}")
+                        else:
+                            print(f"      - 오버레이 렌더 이미지:")
+                            print(f"        * URL: {overlay_layout[0]}")
+                            print(f"        * 절대 경로: (URL 형식 오류)")
+                    except (HTTPException, Exception) as e:
                         print(f"      - 오버레이 렌더 이미지:")
                         print(f"        * URL: {overlay_layout[0]}")
-                        print(f"        * 절대 경로: {render_path}")
-                        print(f"        * 파일 존재: {'✅' if os.path.exists(render_path) else '❌'}")
-                    else:
-                        print(f"      - 오버레이 렌더 이미지:")
-                        print(f"        * URL: {overlay_layout[0]}")
-                        print(f"        * 절대 경로: (URL 형식 오류)")
+                        print(f"        * 절대 경로 변환 오류: {e}")
             
             # 각 단계별 평가 결과
             # OCR 평가

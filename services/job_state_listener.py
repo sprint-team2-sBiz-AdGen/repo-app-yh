@@ -3,7 +3,7 @@ PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
 """
 ########################################################
 # created_at: 2025-11-28
-# updated_at: 2025-11-29
+# updated_at: 2025-12-01
 # author: LEEYH205
 # description: PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
 # version: 2.3.0
@@ -441,6 +441,27 @@ class JobStateListener:
                         # Variant가 done 상태이면 다음 단계 트리거
                         if variant_status == 'done':
                             try:
+                                # 트리거 호출 직전에 variant 상태를 다시 확인 (다른 프로세스가 이미 처리했을 수 있음)
+                                final_variant = await conn.fetchrow("""
+                                    SELECT status, current_step
+                                    FROM jobs_variants
+                                    WHERE job_variants_id = $1
+                                """, variant_id)
+                                
+                                if not final_variant:
+                                    logger.warning(f"Variant를 찾을 수 없음: job_variants_id={variant_id}")
+                                    continue
+                                
+                                # 상태가 변경되었으면 스킵
+                                if (final_variant['status'] != variant_status or 
+                                    final_variant['current_step'] != variant_step):
+                                    logger.info(
+                                        f"Variant 상태가 변경되어 스킵: job_variants_id={variant_id}, "
+                                        f"old: {variant_step} ({variant_status}), "
+                                        f"new: {final_variant['current_step']} ({final_variant['status']})"
+                                    )
+                                    continue
+                                
                                 # retry_count 증가
                                 await conn.execute("""
                                     UPDATE jobs_variants
