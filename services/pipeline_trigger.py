@@ -607,6 +607,9 @@ async def _get_text_and_proposal_from_job_variant(job_variants_id: str, job_id: 
     except Exception as e:
         logger.error(f"text 및 proposal_id 조회 오류 (variant): {e}", exc_info=True)
         return None
+
+
+async def _get_text_and_proposal_from_job(job_id: str, tenant_id: str) -> Optional[dict]:
     """
     job_id로부터 text와 proposal_id 조회
     
@@ -628,24 +631,50 @@ async def _get_text_and_proposal_from_job_variant(job_variants_id: str, job_id: 
     try:
         conn = await asyncpg.connect(asyncpg_url)
         try:
-            # job → job_inputs에서 text 조회
-            text_row = await conn.fetchrow(
+            # job → job_inputs에서 text 조회 (txt_ad_copy_generations에서 우선 조회)
+            # 1. txt_ad_copy_generations에서 ad_copy_eng 조회 (우선순위)
+            ad_copy_row = await conn.fetchrow(
                 """
-                SELECT ji.desc_eng
-                FROM jobs j
-                INNER JOIN job_inputs ji ON j.job_id = ji.job_id
-                WHERE j.job_id = $1
-                  AND j.tenant_id = $2
+                SELECT ad_copy_eng, refined_ad_copy_eng
+                FROM txt_ad_copy_generations
+                WHERE job_id = $1
+                  AND generation_stage IN ('ad_copy_eng', 'refined_ad_copy')
+                  AND status = 'done'
+                ORDER BY 
+                    CASE generation_stage
+                        WHEN 'refined_ad_copy' THEN 1
+                        WHEN 'ad_copy_eng' THEN 2
+                    END,
+                    created_at DESC
+                LIMIT 1
                 """,
-                job_id,
-                tenant_id
+                job_id
             )
             
-            if not text_row or not text_row['desc_eng']:
+            text = None
+            if ad_copy_row:
+                text = ad_copy_row['refined_ad_copy_eng'] or ad_copy_row['ad_copy_eng']
+            
+            # 2. txt_ad_copy_generations에서 찾지 못한 경우 job_inputs.desc_eng 조회 (fallback)
+            if not text:
+                text_row = await conn.fetchrow(
+                    """
+                    SELECT ji.desc_eng
+                    FROM jobs j
+                    INNER JOIN job_inputs ji ON j.job_id = ji.job_id
+                    WHERE j.job_id = $1
+                      AND j.tenant_id = $2
+                    """,
+                    job_id,
+                    tenant_id
+                )
+                
+                if text_row and text_row['desc_eng']:
+                    text = text_row['desc_eng']
+            
+            if not text:
                 logger.warning(f"text를 찾을 수 없음: job_id={job_id}, tenant_id={tenant_id}")
                 return None
-            
-            text = text_row['desc_eng']
             
             # job → job_inputs → planner_proposals에서 최신 proposal_id 조회
             proposal_row = await conn.fetchrow(
