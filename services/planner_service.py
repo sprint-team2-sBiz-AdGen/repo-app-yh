@@ -8,10 +8,10 @@
 # - 금지 영역 마스크를 활용한 정교한 계산
 ########################################################
 # created_at: 2025-11-21
-# updated_at: 2025-11-21
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: Planner service for text overlay position proposal
-# version: 0.1.0
+# version: 1.1.0
 # status: development
 # tags: planner, service
 # dependencies: pillow, numpy
@@ -226,11 +226,49 @@ def propose_overlay_positions(
     # avoid 영역 (첫 번째 금지 영역 또는 None)
     avoid = avoid_regions[0] if avoid_regions else None
     
+    # Forbidden 영역의 공간적 위치 분석
+    forbidden_position_info = None
+    if avoid_regions:
+        # 모든 금지 영역의 중심점과 경계 계산
+        all_avoid_x = []
+        all_avoid_y = []
+        all_avoid_w = []
+        all_avoid_h = []
+        
+        for reg in avoid_regions:
+            ax, ay, aw, ah = reg
+            all_avoid_x.append(ax + aw / 2)  # 중심 x
+            all_avoid_y.append(ay + ah / 2)  # 중심 y
+            all_avoid_w.append(aw)
+            all_avoid_h.append(ah)
+        
+        # 평균 중심점
+        avg_center_x = sum(all_avoid_x) / len(all_avoid_x) if all_avoid_x else 0.5
+        avg_center_y = sum(all_avoid_y) / len(all_avoid_y) if all_avoid_y else 0.5
+        
+        # 금지 영역이 중앙에 있는지 판단 (x 좌표가 0.3~0.7 범위)
+        is_center_x = 0.3 <= avg_center_x <= 0.7
+        # 금지 영역이 위쪽에 있는지 판단 (y 좌표가 0.5 미만)
+        is_top_y = avg_center_y < 0.5
+        # 금지 영역이 아래쪽에 있는지 판단 (y 좌표가 0.5 초과)
+        is_bottom_y = avg_center_y > 0.5
+        
+        forbidden_position_info = {
+            "center_x": avg_center_x,
+            "center_y": avg_center_y,
+            "is_center_x": is_center_x,
+            "is_top_y": is_top_y,
+            "is_bottom_y": is_bottom_y
+        }
+        
+        logger.info(f"[Planner] Forbidden 영역 위치 분석: center=({avg_center_x:.2f}, {avg_center_y:.2f}), is_center_x={is_center_x}, is_top_y={is_top_y}, is_bottom_y={is_bottom_y}")
+    
     logger.info(f"[Planner] 최종 반환 proposals 개수: {len(proposals)}")
     
     return {
         "proposals": proposals,
-        "avoid": avoid
+        "avoid": avoid,
+        "forbidden_position": forbidden_position_info
     }
 
 

@@ -11,10 +11,10 @@
 # KoLLaVA 모델 사용은 테스트 했을 때 영어 모델보다 성능이 떨어지는 것을 확인함.
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-20
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: LLaVa model service
-# version: 2.0.0
+# version: 2.1.0
 # status: development
 # tags: llava, model, service
 # dependencies: transformers, torch, accelerate, pillow
@@ -323,6 +323,10 @@ IMPORTANT:
             do_sample=True   # 샘플링 활성화 (기본값 False → True)
         )
         
+        # LLaVA 원본 응답 로깅 (디버깅용)
+        print(f"[폰트 추천] LLaVA 원본 응답 (처음 500자): {response[:500]}")
+        logger.debug(f"[폰트 추천] LLaVA 원본 응답: {response}")
+        
         # JSON 응답 파싱 시도
         font_recommendation = None
         
@@ -333,11 +337,14 @@ IMPORTANT:
             try:
                 import json
                 font_recommendation = json.loads(json_str)
+                # JSON 파싱 성공했지만 dict가 아닌 경우 처리
+                if not isinstance(font_recommendation, dict):
+                    font_recommendation = {}
             except json.JSONDecodeError:
                 # JSON 파싱 실패 시 정규식으로 추출
-                pass
+                font_recommendation = None
         
-        # JSON 파싱 실패 시 정규식으로 필드 추출
+        # JSON 파싱 실패 시 또는 font_name이 없는 경우 정규식으로 필드 추출
         if not font_recommendation:
             font_recommendation = {}
             response_lower = response.lower()
@@ -381,37 +388,149 @@ IMPORTANT:
             if color_match:
                 font_recommendation['font_color_hex'] = color_match.group(1).upper()
             
-            # font_name 추출
+            # font_name 추출 (여러 패턴 시도)
+            name_match = None
+            
+            # 패턴 1: JSON 형식 "font_name": "폰트명"
             name_match = re.search(r'"font_name"[:\s]+"([^"]+)"', response, re.IGNORECASE)
             if not name_match:
-                name_match = re.search(r'font[_\s]name[:\s]+([^\n,]+)', response, re.IGNORECASE)
+                # 패턴 2: JSON 형식 (작은따옴표)
+                name_match = re.search(r'"font_name"[:\s]+\'([^\']+)\'', response, re.IGNORECASE)
             if not name_match:
-                # reasoning에서 폰트 이름 추출 시도 (예: "Gmarket Sans is a friendly...")
-                reasoning_text = font_recommendation.get('reasoning', '') or response
-                # Pass 폴더의 폰트 이름 패턴 매칭
-                pass_font_names = [
-                    "Gmarket Sans", "Gmarket Sans Bold", "Gmarket Sans Medium",
-                    "Baemin Dohyeon", "Baemin Euljiro",
-                    "Pretendard GOV Bold", "Pretendard Bold",
-                    "Nanum Gothic Bold",
-                    "Cafe24 Classictype", "Cafe24 Danjunghae", "Cafe24 Ssurround", "Cafe24 Supermagic",
-                    "Jalnan", "Jalnan Gothic",
-                    "DdangFonts", "DdangFonts Light", "DdangFonts Medium", "DdangFonts Bold"
-                ]
-                for font_name in pass_font_names:
-                    if font_name.lower() in reasoning_text.lower():
-                        font_recommendation['font_name'] = font_name
-                        print(f"[폰트 이름 추출] reasoning에서 발견: {font_name}")
-                        break
-            if name_match:
-                font_recommendation['font_name'] = name_match.group(1).strip()
+                # 패턴 3: font_name: 폰트명 (콜론 형식)
+                name_match = re.search(r'font[_\s]name[:\s]+([^\n,}"]+)', response, re.IGNORECASE)
+            if not name_match:
+                # 패턴 4: font_name = "폰트명"
+                name_match = re.search(r'font[_\s]name\s*=\s*["\']([^"\']+)["\']', response, re.IGNORECASE)
             
-            # reasoning 추출
-            reasoning_match = re.search(r'"reasoning"[:\s]+"([^"]+)"', response, re.IGNORECASE | re.DOTALL)
-            if not reasoning_match:
-                reasoning_match = re.search(r'reasoning[:\s]+([^\n]+)', response, re.IGNORECASE)
-            if reasoning_match:
-                font_recommendation['reasoning'] = reasoning_match.group(1).strip()
+            if name_match:
+                extracted_name = name_match.group(1).strip()
+                # 따옴표 제거
+                extracted_name = extracted_name.strip('"\'')
+                font_recommendation['font_name'] = extracted_name
+                print(f"[폰트 이름 추출] JSON/정규식에서 발견: {extracted_name}")
+            else:
+                # reasoning 또는 전체 응답에서 폰트 이름 추출 시도
+                search_text = font_recommendation.get('reasoning', '') or response
+                
+                # fonts.py의 FONT_NAME_MAP에서 한글 폰트 이름 리스트 생성 (키를 사용)
+                from fonts import FONT_NAME_MAP
+                
+                # FONT_NAME_MAP의 키들을 원본 대소문자 형태로 변환 (긴 이름부터 매칭)
+                # FONT_NAME_MAP 키는 소문자이므로, 실제 사용되는 이름 형태로 변환
+                korean_font_names = [
+                    "Pretendard GOV Bold", "Pretendard GOV", "Pretendard Bold", "Pretendard",
+                    "Gmarket Sans Bold", "Gmarket Sans Medium", "Gmarket Sans",
+                    "Baemin Dohyeon", "Baemin Euljiro", "Baemin",
+                    "Nanum Gothic Bold", "Nanum Gothic",
+                    "Cafe24 Classictype", "Cafe24 Danjunghae", "Cafe24 Ssurround", "Cafe24 Supermagic", "Cafe24 Supermagic Bold",
+                    "Jalnan Gothic", "Jalnan", "Jalnan2",
+                    "DdangFonts Bold", "DdangFonts Medium", "DdangFonts Light", "DdangFonts",
+                    "땅스부대찌개 Bold", "땅스부대찌개 Medium", "땅스부대찌개 Light", "땅스부대찌개"
+                ]
+                
+                # 전체 응답에서 폰트 이름 찾기 (대소문자 구분 없이)
+                search_text_lower = search_text.lower()
+                found_font = None
+                
+                for font_name in korean_font_names:
+                    # 패턴 1: 따옴표로 감싸진 경우: "Pretendard GOV" 또는 'Pretendard GOV'
+                    # 작은따옴표나 큰따옴표로 감싸진 경우를 매칭
+                    quoted_pattern = r'["\']' + re.escape(font_name) + r'["\']'
+                    if re.search(quoted_pattern, search_text, re.IGNORECASE):
+                        found_font = font_name
+                        print(f"[폰트 이름 추출] reasoning/응답에서 발견 (따옴표 매칭): {font_name}")
+                        break
+                    
+                    # 패턴 2: 단어 경계로 매칭: "Pretendard GOV font" 또는 "The Pretendard GOV"
+                    word_boundary_pattern = r'\b' + re.escape(font_name) + r'\b'
+                    if re.search(word_boundary_pattern, search_text, re.IGNORECASE):
+                        found_font = font_name
+                        print(f"[폰트 이름 추출] reasoning/응답에서 발견 (단어 경계 매칭): {font_name}")
+                        break
+                    
+                    # 패턴 3: 부분 매칭 (단어 경계 고려, 소문자 변환 후)
+                    font_name_lower = font_name.lower()
+                    if font_name_lower in search_text_lower:
+                        # 단어 경계 확인 (앞뒤로 공백, 따옴표, 콜론, 점 등)
+                        word_boundary_pattern_lower = r'(?:^|[\s"\'():,\.])' + re.escape(font_name_lower) + r'(?:[\s"\'():,\.]|$)'
+                        if re.search(word_boundary_pattern_lower, search_text_lower):
+                            found_font = font_name
+                            print(f"[폰트 이름 추출] 단어 경계 매칭으로 발견 (소문자): {font_name}")
+                            break
+                
+                if found_font:
+                    font_recommendation['font_name'] = found_font
+                    logger.info(f"[폰트 이름 추출] 최종 추출된 폰트: {found_font}")
+        
+        # JSON 파싱이 성공했지만 font_name이 없는 경우에도 추출 시도
+        if isinstance(font_recommendation, dict) and not font_recommendation.get('font_name'):
+            # reasoning 또는 전체 응답에서 폰트 이름 추출 시도
+            search_text = font_recommendation.get('reasoning', '') or response
+            
+            # fonts.py의 FONT_NAME_MAP에서 한글 폰트 이름 리스트 생성
+            from fonts import FONT_NAME_MAP
+            
+            # FONT_NAME_MAP의 키들을 실제 사용되는 이름 형태로 변환 (긴 이름부터 매칭)
+            korean_font_names = [
+                "Pretendard GOV Bold", "Pretendard GOV", "Pretendard Bold", "Pretendard",
+                "Gmarket Sans Bold", "Gmarket Sans Medium", "Gmarket Sans",
+                "Baemin Dohyeon", "Baemin Euljiro", "Baemin",
+                "Nanum Gothic Bold", "Nanum Gothic",
+                "Cafe24 Classictype", "Cafe24 Danjunghae", "Cafe24 Ssurround", "Cafe24 Supermagic", "Cafe24 Supermagic Bold",
+                "Jalnan Gothic", "Jalnan", "Jalnan2",
+                "DdangFonts Bold", "DdangFonts Medium", "DdangFonts Light", "DdangFonts",
+                "땅스부대찌개 Bold", "땅스부대찌개 Medium", "땅스부대찌개 Light", "땅스부대찌개"
+            ]
+            
+            # 전체 응답에서 폰트 이름 찾기 (대소문자 구분 없이)
+            search_text_lower = search_text.lower()
+            found_font = None
+            
+            for font_name in korean_font_names:
+                # 패턴 1: 따옴표로 감싸진 경우: "Pretendard GOV" 또는 'Pretendard GOV'
+                quoted_pattern = r'["\']' + re.escape(font_name) + r'["\']'
+                if re.search(quoted_pattern, search_text, re.IGNORECASE):
+                    found_font = font_name
+                    print(f"[폰트 이름 추출] JSON 파싱 후 reasoning에서 발견 (따옴표 매칭): {font_name}")
+                    break
+                
+                # 패턴 2: 단어 경계로 매칭: "Pretendard GOV font" 또는 "The Pretendard GOV"
+                word_boundary_pattern = r'\b' + re.escape(font_name) + r'\b'
+                if re.search(word_boundary_pattern, search_text, re.IGNORECASE):
+                    found_font = font_name
+                    print(f"[폰트 이름 추출] JSON 파싱 후 reasoning에서 발견 (단어 경계 매칭): {font_name}")
+                    break
+                
+                # 패턴 3: 부분 매칭 (단어 경계 고려, 소문자 변환 후)
+                font_name_lower = font_name.lower()
+                if font_name_lower in search_text_lower:
+                    # 단어 경계 확인 (앞뒤로 공백, 따옴표, 콜론, 점 등)
+                    word_boundary_pattern_lower = r'(?:^|[\s"\'():,\.])' + re.escape(font_name_lower) + r'(?:[\s"\'():,\.]|$)'
+                    if re.search(word_boundary_pattern_lower, search_text_lower):
+                        found_font = font_name
+                        print(f"[폰트 이름 추출] JSON 파싱 후 단어 경계 매칭으로 발견 (소문자): {font_name}")
+                        break
+            
+            if found_font:
+                font_recommendation['font_name'] = found_font
+                logger.info(f"[폰트 이름 추출] 최종 추출된 폰트 (JSON 파싱 후): {found_font}")
+            
+            # reasoning 추출 (이미 있으면 스킵)
+            if not font_recommendation.get('reasoning'):
+                reasoning_match = re.search(r'"reasoning"[:\s]+"([^"]+)"', response, re.IGNORECASE | re.DOTALL)
+                if not reasoning_match:
+                    reasoning_match = re.search(r'reasoning[:\s]+([^\n]+)', response, re.IGNORECASE)
+                if reasoning_match:
+                    font_recommendation['reasoning'] = reasoning_match.group(1).strip()
+        else:
+            # reasoning 추출 (JSON 파싱 실패 시)
+            if not font_recommendation.get('reasoning'):
+                reasoning_match = re.search(r'"reasoning"[:\s]+"([^"]+)"', response, re.IGNORECASE | re.DOTALL)
+                if not reasoning_match:
+                    reasoning_match = re.search(r'reasoning[:\s]+([^\n]+)', response, re.IGNORECASE)
+                if reasoning_match:
+                    font_recommendation['reasoning'] = reasoning_match.group(1).strip()
         
         # 기본값 설정 (추출 실패 시)
         if not font_recommendation.get('font_style'):

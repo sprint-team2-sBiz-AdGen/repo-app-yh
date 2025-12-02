@@ -3,10 +3,10 @@ Job 상태 변화에 따라 다음 파이프라인 단계를 자동으로 트리
 """
 ########################################################
 # created_at: 2025-11-28
-# updated_at: 2025-12-01
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: Job 상태 변화에 따라 다음 파이프라인 단계를 자동으로 트리거
-# version: 2.1.0
+# version: 2.2.0
 # status: development
 # tags: pipeline, trigger, automation
 # dependencies: httpx, asyncpg
@@ -16,6 +16,7 @@ Job 상태 변화에 따라 다음 파이프라인 단계를 자동으로 트리
 
 import logging
 import httpx
+import uuid
 from typing import Optional
 from config import HOST, PORT
 
@@ -382,6 +383,17 @@ async def trigger_next_pipeline_stage_for_variant(
         )
         return
     
+    # Job 레벨 단계인 경우 variant 레벨 트리거에서 스킵
+    # (Job 레벨 단계는 모든 variants 완료 후 Job 레벨 트리거에서 처리)
+    if stage_info.get('is_job_level', False):
+        logger.debug(
+            f"Job 레벨 단계이므로 Variant 레벨 트리거 스킵: job_variants_id={job_variants_id}, "
+            f"next_step={stage_info['next_step']}. 모든 variants 완료 후 Job 레벨 트리거에서 처리됩니다."
+        )
+        # 모든 variants 완료 확인 및 Job 레벨 트리거 실행
+        await _check_and_trigger_job_level_stage(job_id, current_step, status, tenant_id, stage_info)
+        return
+    
     # 중복 실행 방지: job_variant 상태 재확인
     if not await _verify_job_variant_state(job_variants_id, current_step, status, tenant_id):
         logger.info(
@@ -737,4 +749,116 @@ async def _get_text_and_proposal_from_job(job_id: str, tenant_id: str) -> Option
     except Exception as e:
         logger.error(f"text 및 proposal_id 조회 오류: {e}", exc_info=True)
         return None
+
+async def _check_and_trigger_job_level_stage(
+    job_id: str,
+    current_step: str,
+    status: str,
+    tenant_id: str,
+    stage_info: dict
+):
+    """
+    모든 variants가 완료되었는지 확인하고, Job 레벨 단계 트리거
+    
+    Args:
+        job_id: Job ID
+        current_step: 현재 단계 (예: 'iou_eval')
+        status: 현재 상태 (예: 'done')
+        tenant_id: Tenant ID
+        stage_info: 다음 단계 정보
+    """
+    import asyncpg
+    from config import DATABASE_URL
+    
+    asyncpg_url = DATABASE_URL.replace("postgresql://", "postgres://")
+    
+    try:
+        conn = await asyncpg.connect(asyncpg_url)
+        try:
+            # 모든 variants가 current_step (done) 완료되었는지 확인
+            row = await conn.fetchrow(
+                """
+                SELECT 
+                    COUNT(*) as total_variants,
+                    COUNT(*) FILTER (
+                        WHERE status = 'done' AND current_step = $2
+                    ) as completed_variants
+                FROM jobs_variants
+                WHERE job_id = $1
+                """,
+                uuid.UUID(job_id),
+                current_step
+            )
+            
+            if not row:
+                logger.warning(f"Job variants를 찾을 수 없음: job_id={job_id}")
+                return
+            
+            total_variants = row['total_variants'] or 0
+            completed_variants = row['completed_variants'] or 0
+            
+            if total_variants == 0:
+                logger.warning(f"Job에 variants가 없음: job_id={job_id}")
+                return
+            
+            # 모든 variants가 완료되었는지 확인
+            if completed_variants < total_variants:
+                logger.debug(
+                    f"아직 모든 variants가 완료되지 않음: job_id={job_id}, "
+                    f"completed={completed_variants}/{total_variants}"
+                )
+                return
+            
+            # Job 상태 확인 및 업데이트
+            job_row = await conn.fetchrow(
+                """
+                SELECT status, current_step
+                FROM jobs
+                WHERE job_id = $1
+                """,
+                uuid.UUID(job_id)
+            )
+            
+            if not job_row:
+                logger.warning(f"Job을 찾을 수 없음: job_id={job_id}")
+                return
+            
+            # Job이 아직 current_step에 있으면 다음 단계로 진행
+            if job_row['current_step'] == current_step and job_row['status'] != 'done':
+                # Job 상태를 done으로 업데이트 (트리거 발동)
+                await conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'done',
+                        current_step = $2,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = $1
+                      AND current_step = $2
+                    """,
+                    uuid.UUID(job_id),
+                    current_step
+                )
+                logger.info(
+                    f"✅ 모든 variants 완료! Job 레벨 트리거 발동: job_id={job_id}, "
+                    f"current_step={current_step} → next_step={stage_info['next_step']}"
+                )
+            elif job_row['current_step'] == current_step and job_row['status'] == 'done':
+                # 이미 done 상태이면 Job 레벨 트리거 직접 실행
+                logger.info(
+                    f"모든 variants 완료, Job 레벨 트리거 실행: job_id={job_id}, "
+                    f"next_step={stage_info['next_step']}"
+                )
+                await trigger_next_pipeline_stage(
+                    job_id=job_id,
+                    current_step=current_step,
+                    status=status,
+                    tenant_id=tenant_id
+                )
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.error(
+            f"Job 레벨 단계 확인 및 트리거 오류: job_id={job_id}, error={e}",
+            exc_info=True
+        )
 

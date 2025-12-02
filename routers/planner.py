@@ -9,10 +9,10 @@
 # - YOLO 감지 결과 활용
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-28
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: Planner logic
-# version: 1.1.0
+# version: 2.0.0
 # status: development
 # tags: planner
 # dependencies: fastapi, pydantic, PIL, requests
@@ -21,12 +21,12 @@
 ########################################################
 
 from fastapi import APIRouter, HTTPException, Depends
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import uuid
 from models import PlannerIn, PlannerOut, ProposalOut
-from utils import abs_from_url
+from utils import abs_from_url, save_asset
 from services.planner_service import propose_overlay_positions
 from database import get_db, Job, JobInput, ImageAsset, Detection, YOLORun, PlannerProposal, JobVariant
 import logging
@@ -238,7 +238,140 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
             ProposalOut(**prop) for prop in result.get("proposals", [])
         ]
         
-        # Step 5.5: planner_proposals 테이블에 결과 저장
+        # Step 5.5: Proposal box를 그린 이미지 생성 및 저장
+        proposal_image_asset_id = None
+        proposal_image_url = None
+        try:
+            # 원본 이미지에 proposal box 그리기
+            if im and proposals:
+                # 이미지를 RGBA로 변환 (투명도 지원)
+                proposal_image = im.convert("RGBA")
+                draw = ImageDraw.Draw(proposal_image)
+                w, h = proposal_image.size
+                
+                # 폰트 로드 시도
+                try:
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+                except:
+                    try:
+                        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 16)
+                    except:
+                        font = ImageFont.load_default()
+                
+                # 금지 영역 그리기 (빨간색)
+                if result.get("avoid"):
+                    avoid = result.get("avoid")
+                    if isinstance(avoid, list) and len(avoid) == 4:
+                        ax, ay, aw, ah = avoid
+                        ax_px = int(ax * w)
+                        ay_px = int(ay * h)
+                        aw_px = int(aw * w)
+                        ah_px = int(ah * h)
+                        # 반투명 빨간색 배경
+                        overlay = Image.new("RGBA", (w, h), (255, 0, 0, 50))
+                        overlay_draw = ImageDraw.Draw(overlay)
+                        overlay_draw.rectangle(
+                            [ax_px, ay_px, ax_px + aw_px, ay_px + ah_px],
+                            fill=(255, 0, 0, 50),
+                            outline="red",
+                            width=3
+                        )
+                        proposal_image = Image.alpha_composite(proposal_image, overlay)
+                        draw = ImageDraw.Draw(proposal_image)
+                        # 라벨 추가
+                        draw.text((ax_px + 5, ay_px + 5), "AVOID", fill="red", font=font)
+                
+                # Proposal box 그리기 (다양한 색상)
+                colors = [
+                    (0, 255, 0, 200),    # 초록
+                    (0, 0, 255, 200),    # 파랑
+                    (255, 255, 0, 200),  # 노랑
+                    (255, 0, 255, 200),  # 마젠타
+                    (0, 255, 255, 200),  # 시안
+                    (255, 165, 0, 200),  # 주황
+                ]
+                
+                for i, proposal in enumerate(proposals):
+                    prop_dict = proposal.dict() if hasattr(proposal, 'dict') else proposal
+                    xywh = prop_dict.get("xywh", [])
+                    if len(xywh) != 4:
+                        continue
+                    
+                    x, y, width, height = xywh
+                    x_px = int(x * w)
+                    y_px = int(y * h)
+                    width_px = int(width * w)
+                    height_px = int(height * h)
+                    
+                    color = colors[i % len(colors)]
+                    source = prop_dict.get("source", f"proposal_{i+1}")
+                    score = prop_dict.get("score", 0)
+                    
+                    # 반투명 배경 그리기
+                    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+                    overlay_draw = ImageDraw.Draw(overlay)
+                    overlay_draw.rectangle(
+                        [x_px, y_px, x_px + width_px, y_px + height_px],
+                        fill=(color[0], color[1], color[2], 50),
+                        outline=(color[0], color[1], color[2], 255),
+                        width=3
+                    )
+                    proposal_image = Image.alpha_composite(proposal_image, overlay)
+                    draw = ImageDraw.Draw(proposal_image)
+                    
+                    # 라벨 추가
+                    label = f"{source}\nscore:{score:.2f}"
+                    try:
+                        bbox = draw.textbbox((x_px + 5, y_px + 5), label, font=font)
+                        text_bg = [bbox[0] - 4, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2]
+                        draw.rectangle(text_bg, fill=(color[0], color[1], color[2], 200))
+                        draw.text((x_px + 5, y_px + 5), label, fill="white", font=font)
+                    except:
+                        draw.rectangle([x_px + 5, y_px + 5, x_px + 200, y_px + 40], fill=(color[0], color[1], color[2], 200))
+                        draw.text((x_px + 5, y_px + 5), label, fill="white")
+                
+                # RGB로 변환하여 저장
+                proposal_image_rgb = proposal_image.convert("RGB")
+                
+                # 이미지 저장
+                asset_meta = save_asset(body.tenant_id, "planner", proposal_image_rgb, ".png")
+                proposal_image_asset_id = uuid.UUID(asset_meta["asset_id"])
+                proposal_image_url = asset_meta["url"]
+                
+                # image_assets 테이블에 저장
+                existing_asset = db.query(ImageAsset).filter(
+                    ImageAsset.image_asset_id == proposal_image_asset_id
+                ).first()
+                
+                if not existing_asset:
+                    db.execute(
+                        text("""
+                            INSERT INTO image_assets (
+                                image_asset_id, image_type, image_url, width, height,
+                                tenant_id, created_at, updated_at
+                            ) VALUES (
+                                :image_asset_id, 'planner', :image_url, :width, :height,
+                                :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                            )
+                        """),
+                        {
+                            "image_asset_id": proposal_image_asset_id,
+                            "image_url": proposal_image_url,
+                            "width": asset_meta["width"],
+                            "height": asset_meta["height"],
+                            "tenant_id": body.tenant_id
+                        }
+                    )
+                    db.commit()
+                    logger.info(f"Proposal box image saved: image_asset_id={proposal_image_asset_id}, url={proposal_image_url}")
+                else:
+                    logger.info(f"Proposal box image already exists: image_asset_id={proposal_image_asset_id}")
+                    
+        except Exception as e:
+            logger.error(f"Failed to create and save proposal box image: {e}", exc_info=True)
+            # 이미지 저장 실패해도 계속 진행
+        
+        # Step 5.6: planner_proposals 테이블에 결과 저장
         try:
             # job_input에서 image_asset_id 가져오기 (이미 위에서 확인함)
             job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
@@ -248,12 +381,15 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                 # 전체 결과를 layout JSONB에 저장
                 import json
                 layout_data = {
-                    "proposals": [prop.dict() for prop in proposals],
+                    "proposals": [prop.dict() if hasattr(prop, 'dict') else prop for prop in proposals],
                     "avoid": result.get("avoid"),
+                    "forbidden_position": result.get("forbidden_position"),  # Forbidden 영역 위치 정보 추가
                     "min_overlay_width": body.min_overlay_width,
                     "min_overlay_height": body.min_overlay_height,
                     "max_proposals": body.max_proposals,
-                    "max_forbidden_iou": body.max_forbidden_iou
+                    "max_forbidden_iou": body.max_forbidden_iou,
+                    "proposal_image_asset_id": str(proposal_image_asset_id) if proposal_image_asset_id else None,
+                    "proposal_image_url": proposal_image_url if proposal_image_asset_id else None
                 }
                 
                 # planner_proposals에 저장 (raw SQL 사용, pk는 SERIAL로 자동 생성)
@@ -276,7 +412,7 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                     }
                 )
                 db.commit()
-                logger.info(f"Planner proposal saved to DB: proposal_id={proposal_id}, image_asset_id={image_asset_id}, latency_ms={latency_ms:.2f}")
+                logger.info(f"Planner proposal saved to DB: proposal_id={proposal_id}, image_asset_id={image_asset_id}, proposal_image_asset_id={proposal_image_asset_id}, latency_ms={latency_ms:.2f}")
             else:
                 logger.warning(f"Could not save planner proposal: image_asset_id not found for job_id={job_id}")
         except Exception as e:

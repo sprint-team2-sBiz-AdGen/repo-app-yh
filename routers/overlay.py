@@ -7,10 +7,10 @@
 # - job 상태 업데이트
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-30
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: Overlay logic with DB integration
-# version: 1.1.0
+# version: 2.0.0
 # status: production
 # tags: overlay
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -175,9 +175,14 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                     layout = proposal.layout
                     if isinstance(layout, dict) and layout.get("proposals"):
                         proposals_list = layout["proposals"]
+                        forbidden_position = layout.get("forbidden_position")
                         if proposals_list:
-                            # 위치 다양성을 고려한 proposal 선택
-                            best_proposal = _select_best_proposal_with_diversity(proposals_list, logger)
+                            # 위치 다양성을 고려한 proposal 선택 (텍스트 길이 및 forbidden 위치 고려)
+                            best_proposal = _select_best_proposal_with_diversity(
+                                proposals_list, logger, 
+                                text=body.text,
+                                forbidden_position=forbidden_position
+                            )
                             
                             if best_proposal and "xywh" in best_proposal:
                                 xywh = best_proposal["xywh"]  # [x, y, width, height] 정규화된 좌표
@@ -219,9 +224,14 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                         layout = latest_proposal.layout
                         if isinstance(layout, dict) and layout.get("proposals"):
                             proposals_list = layout["proposals"]
+                            forbidden_position = layout.get("forbidden_position")
                             if proposals_list:
-                                # 위치 다양성을 고려한 proposal 선택
-                                best_proposal = _select_best_proposal_with_diversity(proposals_list, logger)
+                                # 위치 다양성을 고려한 proposal 선택 (텍스트 길이 및 forbidden 위치 고려)
+                                best_proposal = _select_best_proposal_with_diversity(
+                                    proposals_list, logger, 
+                                    text=body.text,
+                                    forbidden_position=forbidden_position
+                                )
                                 
                                 if best_proposal and "xywh" in best_proposal:
                                     xywh = best_proposal["xywh"]
@@ -894,19 +904,31 @@ def _load_font(font_paths: list, size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _select_best_proposal_with_diversity(proposals_list: list, logger) -> dict:
+def _select_best_proposal_with_diversity(
+    proposals_list: list, 
+    logger, 
+    text: str = None,
+    forbidden_position: dict = None
+) -> dict:
     """
     Score 기반 동적 그룹 선택 + softmax 샘플링으로 다양성을 확보한 proposal 선택
+    텍스트 길이와 Forbidden 영역 위치를 고려하여 가중치 부여
     
     Args:
         proposals_list: proposal 리스트
         logger: 로거 객체
+        text: 오버레이할 텍스트 (Optional, 텍스트 길이 기반 가중치 계산용)
+        forbidden_position: Forbidden 영역 위치 정보 (Optional)
+            - center_x, center_y: 금지 영역 중심점
+            - is_center_x: 금지 영역이 중앙(x축)에 있는지
+            - is_top_y: 금지 영역이 위쪽에 있는지
+            - is_bottom_y: 금지 영역이 아래쪽에 있는지
     
     Returns:
         선택된 proposal 딕셔너리
     """
-    print(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}")
-    logger.info(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}")
+    print(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}, text_length={len(text) if text else 'N/A'}")
+    logger.info(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}, text_length={len(text) if text else 'N/A'}")
     
     if not proposals_list:
         print(f"[위치 선택 함수] proposals_list가 비어있음")
@@ -918,13 +940,56 @@ def _select_best_proposal_with_diversity(proposals_list: list, logger) -> dict:
         logger.info(f"[위치 선택 함수] proposal이 1개만 있음: source={proposals_list[0].get('source')}")
         return proposals_list[0]
     
+    # 텍스트 길이 기반 가중치 계산 (개선: 보너스 최대값 증가)
+    text_length_bonus = 0.0
+    if text:
+        text_len = len(text)
+        # 긴 텍스트(20자 이상)에는 max_size proposal에 보너스 부여
+        if text_len >= 20:
+            # 텍스트가 길수록 더 큰 보너스 (최대 1.0으로 증가)
+            text_length_bonus = min(1.0, (text_len - 20) / 80.0)  # 100자 이상이면 최대 보너스
+            print(f"[위치 선택 함수] 긴 텍스트 감지: {text_len}자, max_size 보너스: {text_length_bonus:.2f}")
+            logger.info(f"[위치 선택 함수] 긴 텍스트 감지: {text_len}자, max_size 보너스: {text_length_bonus:.2f}")
+    
+    # Forbidden 영역 위치 기반 가중치 계산
+    forbidden_bonus = {}  # 그룹별 보너스/페널티
+    if forbidden_position:
+        is_center_x = forbidden_position.get("is_center_x", False)
+        is_top_y = forbidden_position.get("is_top_y", False)
+        is_bottom_y = forbidden_position.get("is_bottom_y", False)
+        
+        print(f"[위치 선택 함수] Forbidden 영역 위치: center_x={is_center_x}, top_y={is_top_y}, bottom_y={is_bottom_y}")
+        logger.info(f"[위치 선택 함수] Forbidden 영역 위치: center_x={is_center_x}, top_y={is_top_y}, bottom_y={is_bottom_y}")
+        
+        # 금지 영역이 위쪽에 있으면 아래쪽에 보너스
+        if is_top_y:
+            forbidden_bonus["bottom"] = 0.3
+            print(f"[위치 선택 함수] Forbidden이 위쪽에 있음 → bottom 그룹에 +0.3 보너스")
+            logger.info(f"[위치 선택 함수] Forbidden이 위쪽에 있음 → bottom 그룹에 +0.3 보너스")
+        
+        # 금지 영역이 아래쪽에 있으면 위쪽에 보너스
+        if is_bottom_y:
+            forbidden_bonus["top"] = 0.3
+            print(f"[위치 선택 함수] Forbidden이 아래쪽에 있음 → top 그룹에 +0.3 보너스")
+            logger.info(f"[위치 선택 함수] Forbidden이 아래쪽에 있음 → top 그룹에 +0.3 보너스")
+        
+        # 금지 영역이 중앙(x축)에 있으면 left, right에 페널티
+        if is_center_x:
+            forbidden_bonus["left"] = -0.3
+            forbidden_bonus["right"] = -0.3
+            print(f"[위치 선택 함수] Forbidden이 중앙에 있음 → left, right 그룹에 -0.3 페널티")
+            logger.info(f"[위치 선택 함수] Forbidden이 중앙에 있음 → left, right 그룹에 -0.3 페널티")
+    
     # source를 기반으로 위치 그룹 분류
     def _get_position_group(source: str) -> str:
-        """source에서 위치 그룹 추출"""
+        """source에서 위치 그룹 추출 (max_size를 우선 확인)"""
         if not source:
             return "unknown"
         source_lower = source.lower()
-        if "top" in source_lower:
+        # max_size를 먼저 확인 (top, bottom 등과 함께 사용될 수 있으므로)
+        if "max_size" in source_lower:
+            return "max_size"
+        elif "top" in source_lower:
             return "top"
         elif "bottom" in source_lower:
             return "bottom"
@@ -934,8 +999,6 @@ def _select_best_proposal_with_diversity(proposals_list: list, logger) -> dict:
             return "right"
         elif "center" in source_lower or "middle" in source_lower:
             return "center"
-        elif "max_size" in source_lower:
-            return "max_size"
         else:
             return "other"
     
@@ -962,11 +1025,49 @@ def _select_best_proposal_with_diversity(proposals_list: list, logger) -> dict:
             best = max(scored_props, key=lambda p: p.get("score", 0))
             group_best[group] = best
             # 그룹 점수: 최고 점수 proposal의 score 사용
-            group_scores[group] = best.get("score", 0.0)
+            base_score = best.get("score", 0.0)
+            adjusted_score = base_score
+            
+            # max_size 그룹이고 긴 텍스트인 경우 보너스 추가
+            if group == "max_size" and text_length_bonus > 0:
+                adjusted_score += text_length_bonus
+                print(f"[위치 선택 함수] max_size 그룹에 텍스트 길이 보너스 적용: {base_score:.2f} -> {adjusted_score:.2f}")
+                logger.info(f"[위치 선택 함수] max_size 그룹에 텍스트 길이 보너스 적용: {base_score:.2f} -> {adjusted_score:.2f}")
+                
+                # max_size proposal이 top/bottom도 포함하는 경우 해당 그룹의 보너스도 적용
+                source_lower = best.get("source", "").lower()
+                if "top" in source_lower and "top" in forbidden_bonus:
+                    adjusted_score += forbidden_bonus["top"]
+                    print(f"[위치 선택 함수] max_size 그룹에 top 보너스 추가 적용: {adjusted_score - forbidden_bonus['top']:.2f} -> {adjusted_score:.2f}")
+                    logger.info(f"[위치 선택 함수] max_size 그룹에 top 보너스 추가 적용: {adjusted_score - forbidden_bonus['top']:.2f} -> {adjusted_score:.2f}")
+                elif "bottom" in source_lower and "bottom" in forbidden_bonus:
+                    adjusted_score += forbidden_bonus["bottom"]
+                    print(f"[위치 선택 함수] max_size 그룹에 bottom 보너스 추가 적용: {adjusted_score - forbidden_bonus['bottom']:.2f} -> {adjusted_score:.2f}")
+                    logger.info(f"[위치 선택 함수] max_size 그룹에 bottom 보너스 추가 적용: {adjusted_score - forbidden_bonus['bottom']:.2f} -> {adjusted_score:.2f}")
+            
+            # Forbidden 영역 위치 기반 보너스/페널티 적용 (max_size가 아닌 경우만)
+            if group != "max_size" and group in forbidden_bonus:
+                adjusted_score += forbidden_bonus[group]
+                bonus_type = "보너스" if forbidden_bonus[group] > 0 else "페널티"
+                print(f"[위치 선택 함수] {group} 그룹에 Forbidden 위치 {bonus_type} 적용: {base_score:.2f} -> {adjusted_score:.2f}")
+                logger.info(f"[위치 선택 함수] {group} 그룹에 Forbidden 위치 {bonus_type} 적용: {base_score:.2f} -> {adjusted_score:.2f}")
+            
+            group_scores[group] = adjusted_score
         elif props:
             # score가 없으면 첫 번째 사용하고 기본 점수 부여
             group_best[group] = props[0]
-            group_scores[group] = 0.5  # 기본 점수
+            base_score = 0.5  # 기본 점수
+            adjusted_score = base_score
+            
+            # max_size 그룹이고 긴 텍스트인 경우 보너스 추가
+            if group == "max_size" and text_length_bonus > 0:
+                adjusted_score += text_length_bonus
+            
+            # Forbidden 영역 위치 기반 보너스/페널티 적용
+            if group in forbidden_bonus:
+                adjusted_score += forbidden_bonus[group]
+            
+            group_scores[group] = adjusted_score
         else:
             continue
     
@@ -975,12 +1076,45 @@ def _select_best_proposal_with_diversity(proposals_list: list, logger) -> dict:
         logger.warning(f"[위치 선택] 모든 proposal에 score가 없음, 첫 번째 사용")
         return proposals_list[0]
     
-    # Softmax 샘플링을 위한 점수 정규화
-    # temperature 파라미터: 낮을수록 더 확실한 선택, 높을수록 더 다양성 확보
-    temperature = 1.0  # 기본값 (조정 가능)
+    # 매우 긴 텍스트(100자 이상)이고 max_size proposal이 있으면 강제 선택
+    if text and len(text) >= 100 and "max_size" in group_best:
+        max_size_prop = group_best["max_size"]
+        print(f"[위치 선택 함수] 매우 긴 텍스트({len(text)}자) 감지 → max_size proposal 강제 선택")
+        logger.info(f"[위치 선택 함수] 매우 긴 텍스트({len(text)}자) 감지 → max_size proposal 강제 선택")
+        return max_size_prop
     
     groups = list(group_best.keys())
     scores = [group_scores[g] for g in groups]
+    
+    # 점수 차이가 클 때는 최고 점수 proposal을 직접 선택 (확실한 선택)
+    max_score = max(scores)
+    min_score = min(scores)
+    score_diff = max_score - min_score
+    score_ratio = max_score / min_score if min_score > 0 else float('inf')
+    
+    # 두 번째로 높은 점수와의 차이도 확인
+    sorted_scores = sorted(scores, reverse=True)
+    second_score = sorted_scores[1] if len(sorted_scores) > 1 else min_score
+    diff_from_second = max_score - second_score
+    
+    # 최고 점수가 다른 점수들보다 충분히 높으면 (차이가 0.2 이상이거나 비율이 1.15 이상, 또는 두 번째와의 차이가 0.15 이상) 직접 선택
+    if score_diff >= 0.2 or score_ratio >= 1.15 or diff_from_second >= 0.15:
+        best_group_idx = scores.index(max_score)
+        best_group = groups[best_group_idx]
+        selected = group_best[best_group]
+        print(f"[위치 선택 함수] 점수 차이가 큼 (차이={score_diff:.2f}, 비율={score_ratio:.2f}) → 최고 점수 proposal 직접 선택: {best_group} (점수={max_score:.2f})")
+        logger.info(f"[위치 선택 함수] 점수 차이가 큼 (차이={score_diff:.2f}, 비율={score_ratio:.2f}) → 최고 점수 proposal 직접 선택: {best_group} (점수={max_score:.2f})")
+        return selected
+    
+    # Softmax 샘플링을 위한 점수 정규화
+    # temperature 파라미터: 낮을수록 더 확실한 선택, 높을수록 더 다양성 확보
+    # 긴 텍스트일 때는 더 확실하게 선택하도록 temperature 낮춤
+    if text and len(text) >= 100:
+        temperature = 0.5  # 매우 긴 텍스트는 더 확실하게 선택
+    elif text and len(text) >= 50:
+        temperature = 0.7  # 긴 텍스트는 중간 정도
+    else:
+        temperature = 1.0  # 기본값
     
     # Softmax 계산
     # 안정성을 위해 최대값을 빼서 계산 (overflow 방지)
