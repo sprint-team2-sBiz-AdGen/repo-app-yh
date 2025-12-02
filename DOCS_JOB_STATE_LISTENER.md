@@ -2,7 +2,15 @@
 
 ## 📋 개요
 
-Job State Listener는 PostgreSQL LISTEN/NOTIFY를 사용하여 `jobs` 테이블의 상태 변화를 실시간으로 감지하고, 파이프라인 단계를 자동으로 실행하는 시스템입니다.
+Job State Listener는 PostgreSQL LISTEN/NOTIFY를 사용하여 `jobs_variants` 테이블의 상태 변화를 실시간으로 감지하고, 파이프라인 단계를 자동으로 실행하는 시스템입니다.
+
+**현재 구현 상태**: ✅ 완료 (v2.3.0)
+- `jobs_variants` 테이블 기반 자동 트리거
+- `job_variant_state_changed` 채널 리스닝
+- `job_state_changed` 채널 리스닝 (뒤처진 variants 복구용)
+- 10단계 파이프라인 자동화
+- 뒤처진 variants 자동 복구
+- 주기적 수동 복구 체크 (1분 간격)
 
 ### 주요 기능
 
@@ -18,44 +26,67 @@ Job State Listener는 PostgreSQL LISTEN/NOTIFY를 사용하여 `jobs` 테이블�
 
 ### 1. PostgreSQL 트리거
 
-`jobs` 테이블의 `current_step` 또는 `status`가 변경되면:
-- PostgreSQL 트리거 함수 `notify_job_state_change()` 실행
-- `pg_notify('job_state_changed', JSON)` 이벤트 발행
+`jobs_variants` 테이블의 `current_step` 또는 `status`가 변경되면:
+- PostgreSQL 트리거 함수 `notify_job_variant_state_change()` 실행
+- `pg_notify('job_variant_state_changed', JSON)` 이벤트 발행
 
 ### 2. Python 리스너
 
 - `asyncpg`로 PostgreSQL에 연결
-- `LISTEN 'job_state_changed'` 시작
+- `LISTEN 'job_variant_state_changed'` 시작 (주요 채널)
+- `LISTEN 'job_state_changed'` 시작 (뒤처진 variants 복구용)
 - 이벤트 수신 시 파이프라인 트리거 서비스 호출
 
 ### 3. 파이프라인 트리거
 
-- 이벤트에서 job 정보 추출
+- 이벤트에서 variant 정보 추출 (`job_variants_id`, `job_id`, `current_step`, `status`)
 - 조건 확인 (`current_step`, `status`)
-- 다음 단계 API 자동 호출
+- 다음 단계 API 자동 호출 (Variant별 또는 Job 레벨)
 
 ---
 
-## 🔄 파이프라인 단계 흐름
+## 🔄 파이프라인 단계 흐름 (10단계)
 
 ```
-img_gen (done) 
-  → vlm_analyze (LLaVA Stage 1) [자동 실행]
-  → yolo_detect [자동 실행]
-  → planner [자동 실행]
-  → overlay [자동 실행]
-  → vlm_judge (LLaVA Stage 2) [자동 실행]
+img_gen (done) [전 단계: YE 파트]
+  ↓ [자동 트리거]
+vlm_analyze (LLaVA Stage 1) [Variant별 실행]
+  ↓ [자동 트리거]
+yolo_detect [Variant별 실행]
+  ↓ [자동 트리거]
+planner [Variant별 실행]
+  ↓ [자동 트리거]
+overlay [Variant별 실행]
+  ↓ [자동 트리거]
+vlm_judge (LLaVA Stage 2) [Variant별 실행]
+  ↓ [자동 트리거]
+ocr_eval [Variant별 실행]
+  ↓ [자동 트리거]
+readability_eval [Variant별 실행]
+  ↓ [자동 트리거]
+iou_eval [Variant별 실행]
+  ↓ [모든 variants 완료 시 자동 트리거]
+ad_copy_gen_kor (Eng→Kor 변환) [Job 레벨 실행]
+  ↓ [자동 트리거]
+instagram_feed_gen (피드 생성) [Job 레벨 실행]
+  ↓
+완료
 ```
 
 ### 트리거 조건
 
-| 이전 단계 완료 조건 | 다음 단계 (자동 실행) |
-|-------------------|---------------------|
-| `current_step='img_gen'`, `status='done'` | → LLaVA Stage 1 |
-| `current_step='vlm_analyze'`, `status='done'` | → YOLO |
-| `current_step='yolo_detect'`, `status='done'` | → Planner |
-| `current_step='planner'`, `status='done'` | → Overlay |
-| `current_step='overlay'`, `status='done'` | → LLaVA Stage 2 |
+| 이전 단계 완료 조건 | 다음 단계 (자동 실행) | 실행 레벨 |
+|-------------------|---------------------|----------|
+| `current_step='img_gen'`, `status='done'` | → vlm_analyze | Variant |
+| `current_step='vlm_analyze'`, `status='done'` | → yolo_detect | Variant |
+| `current_step='yolo_detect'`, `status='done'` | → planner | Variant |
+| `current_step='planner'`, `status='done'` | → overlay | Variant |
+| `current_step='overlay'`, `status='done'` | → vlm_judge | Variant |
+| `current_step='vlm_judge'`, `status='done'` | → ocr_eval | Variant |
+| `current_step='ocr_eval'`, `status='done'` | → readability_eval | Variant |
+| `current_step='readability_eval'`, `status='done'` | → iou_eval | Variant |
+| `current_step='iou_eval'`, `status='done'` (모든 variants 완료) | → ad_copy_gen_kor | Job |
+| `current_step='ad_copy_gen_kor'`, `status='done'` | → instagram_feed_gen | Job |
 
 ---
 
@@ -104,22 +135,25 @@ pip install asyncpg>=0.29.0 httpx>=0.24.0
 
 PostgreSQL 데이터베이스에 트리거 함수와 트리거를 생성해야 합니다.
 
-#### 트리거 함수 및 트리거 생성
+#### 트리거 함수 및 트리거 생성 (현재 구현)
 
 ```sql
--- 트리거 함수 생성
-CREATE OR REPLACE FUNCTION notify_job_state_change()
+-- 트리거 함수 생성 (jobs_variants 테이블용)
+CREATE OR REPLACE FUNCTION notify_job_variant_state_change()
 RETURNS TRIGGER AS $$
 BEGIN
     -- current_step 또는 status가 변경된 경우에만 NOTIFY 발행
     IF (OLD.current_step IS DISTINCT FROM NEW.current_step 
        OR OLD.status IS DISTINCT FROM NEW.status) THEN
-        PERFORM pg_notify('job_state_changed', 
+        PERFORM pg_notify('job_variant_state_changed', 
             json_build_object(
-                'job_id', NEW.job_id,
+                'job_variants_id', NEW.job_variants_id::text,
+                'job_id', NEW.job_id::text,
                 'current_step', NEW.current_step,
                 'status', NEW.status,
-                'tenant_id', NEW.tenant_id
+                'img_asset_id', NEW.img_asset_id::text,
+                'tenant_id', (SELECT tenant_id FROM jobs WHERE job_id = NEW.job_id),
+                'updated_at', NEW.updated_at
             )::text
         );
     END IF;
@@ -128,14 +162,14 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- 트리거 생성
-DROP TRIGGER IF EXISTS job_state_change_trigger ON jobs;
-CREATE TRIGGER job_state_change_trigger
-    AFTER UPDATE ON jobs
+DROP TRIGGER IF EXISTS job_variant_state_change_trigger ON jobs_variants;
+CREATE TRIGGER job_variant_state_change_trigger
+    AFTER UPDATE ON jobs_variants
     FOR EACH ROW
-    WHEN (OLD.current_step IS DISTINCT FROM NEW.current_step 
-       OR OLD.status IS DISTINCT FROM NEW.status)
-    EXECUTE FUNCTION notify_job_state_change();
+    EXECUTE FUNCTION notify_job_variant_state_change();
 ```
+
+**참고**: `job_state_changed` 채널도 사용되지만, 이는 주로 뒤처진 variants 복구용입니다.
 
 #### 트리거 확인
 
@@ -210,20 +244,25 @@ export ENABLE_JOB_STATE_LISTENER=false
 ENABLE_JOB_STATE_LISTENER=false
 ```
 
-### 2. Job 상태 업데이트
+### 2. Variant 상태 업데이트
 
-파이프라인을 자동으로 실행하려면, job의 상태를 업데이트하면 됩니다:
+파이프라인을 자동으로 실행하려면, variant의 상태를 업데이트하면 됩니다:
 
 ```sql
 -- 예시: img_gen 완료 후 다음 단계 자동 실행
-UPDATE jobs 
+UPDATE jobs_variants 
 SET status = 'done', 
     current_step = 'img_gen',
     updated_at = CURRENT_TIMESTAMP
-WHERE job_id = 'your-job-id';
+WHERE job_variants_id = 'your-job-variants-id';
 ```
 
-이렇게 하면 자동으로 LLaVA Stage 1이 실행됩니다.
+이렇게 하면 자동으로 vlm_analyze (LLaVA Stage 1)가 실행됩니다.
+
+**참고**: 
+- Variant별로 독립적으로 실행됩니다
+- 각 variant가 `img_gen (done)` 상태가 되면 자동으로 다음 단계로 진행됩니다
+- 모든 variants가 `iou_eval (done)` 상태가 되면 Job 레벨 단계(`ad_copy_gen_kor`)가 자동 실행됩니다
 
 ### 3. 수동 실행 (기존 방식)
 
@@ -262,18 +301,19 @@ docker exec feedlyai-work-yh python3 test/test_listener_team.py
 ### 방법 2: 직접 SQL 실행
 
 ```sql
--- 1. 테스트용 job 생성
+-- 1. 테스트용 job 및 variant 생성
 INSERT INTO jobs (job_id, tenant_id, status, current_step)
-VALUES (gen_random_uuid(), 'test_tenant', 'queued', 'img_gen');
+VALUES (gen_random_uuid(), 'test_tenant', 'done', 'img_gen');
 
--- 2. Job 상태를 done으로 변경 (트리거 발동)
-UPDATE jobs 
+INSERT INTO jobs_variants (job_variants_id, job_id, status, current_step)
+VALUES (gen_random_uuid(), 'your-job-id', 'done', 'img_gen');
+
+-- 2. Variant 상태를 업데이트 (트리거 발동)
+UPDATE jobs_variants 
 SET status = 'done', 
     current_step = 'img_gen',
     updated_at = CURRENT_TIMESTAMP
-WHERE tenant_id = 'test_tenant' 
-  AND current_step = 'img_gen'
-LIMIT 1;
+WHERE job_variants_id = 'your-job-variants-id';
 ```
 
 ### 방법 3: 로그 확인
@@ -296,10 +336,13 @@ docker logs -f feedlyai-work-yh | grep -i "listener\|trigger"
 
 | 키워드 | 의미 |
 |--------|------|
-| `[LISTENER] Job 상태 변화 감지` | 이벤트 수신 성공 |
+| `[LISTENER] Job Variant 상태 변화 감지` | Variant 이벤트 수신 성공 |
+| `[LISTENER] Job 상태 변화 감지` | Job 이벤트 수신 성공 (복구용) |
 | `[TRIGGER] 파이프라인 단계 트리거` | 다음 단계 실행 시작 |
 | `파이프라인 단계 실행 성공` | API 호출 성공 |
 | `파이프라인 단계 실행 실패` | API 호출 실패 |
+| `뒤처진 variants 복구` | 자동 복구 실행 |
+| `수동 복구 체크` | 주기적 복구 체크 (1분 간격) |
 | `리스너 오류 발생` | 리스너 오류 |
 | `재연결 시도` | 재연결 시작 |
 
@@ -313,6 +356,7 @@ docker logs feedlyai-work-yh | grep "Job State Listener 시작"
 docker logs feedlyai-work-yh | grep "PostgreSQL 연결 성공"
 
 # LISTEN 시작 확인
+docker logs feedlyai-work-yh | grep "LISTEN 'job_variant_state_changed'"
 docker logs feedlyai-work-yh | grep "LISTEN 'job_state_changed'"
 ```
 
@@ -359,12 +403,12 @@ JOB_STATE_LISTENER_RECONNECT_DELAY=5
 
 ### 문제 2: 이벤트가 수신되지 않음
 
-**증상**: Job 상태를 변경해도 자동 실행되지 않음
+**증상**: Variant 상태를 변경해도 자동 실행되지 않음
 
 **해결 방법**:
 1. 트리거 확인:
    ```bash
-   docker exec feedlyai-work-yh python3 test/test_trigger_verification.py
+   docker exec feedlyai-work-yh python3 test/test_listener_status.py
    ```
 2. PostgreSQL 연결 확인:
    ```bash
@@ -373,10 +417,16 @@ JOB_STATE_LISTENER_RECONNECT_DELAY=5
 3. 트리거 재생성 (필요 시):
    ```sql
    -- 트리거 함수 확인
-   SELECT proname FROM pg_proc WHERE proname = 'notify_job_state_change';
+   SELECT proname FROM pg_proc WHERE proname = 'notify_job_variant_state_change';
    
    -- 트리거 확인
-   SELECT tgname FROM pg_trigger WHERE tgname = 'job_state_change_trigger';
+   SELECT tgname FROM pg_trigger WHERE tgname = 'job_variant_state_change_trigger';
+   ```
+4. Variant 상태 확인:
+   ```sql
+   SELECT job_variants_id, status, current_step, updated_at
+   FROM jobs_variants
+   WHERE job_variants_id = 'your-job-variants-id';
    ```
 
 ### 문제 3: 중복 실행
@@ -412,17 +462,24 @@ JOB_STATE_LISTENER_RECONNECT_DELAY=5
 
 ## 📝 주의사항
 
-### 1. Job 상태 업데이트
+### 1. Variant 상태 업데이트
 
 - **중요**: `current_step`과 `status`가 실제로 변경되어야 트리거가 발동됩니다
 - 같은 값으로 업데이트하면 트리거가 발동되지 않습니다
+- `updated_at` 필드도 `CURRENT_TIMESTAMP`로 업데이트해야 합니다
 
 ```sql
 -- ✅ 트리거 발동됨
-UPDATE jobs SET status = 'done', current_step = 'img_gen' WHERE job_id = '...';
+UPDATE jobs_variants 
+SET status = 'done', 
+    current_step = 'img_gen',
+    updated_at = CURRENT_TIMESTAMP
+WHERE job_variants_id = '...';
 
 -- ❌ 트리거 발동 안 됨 (이미 같은 값)
-UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE job_id = '...';
+UPDATE jobs_variants 
+SET updated_at = CURRENT_TIMESTAMP 
+WHERE job_variants_id = '...';
 ```
 
 ### 2. 여러 워커 인스턴스
@@ -448,16 +505,16 @@ from sqlalchemy import text
 
 db = SessionLocal()
 try:
-    # img_gen 완료 처리
+    # img_gen 완료 처리 (variant별)
     db.execute(text("""
-        UPDATE jobs 
+        UPDATE jobs_variants 
         SET status = 'done', 
             current_step = 'img_gen',
             updated_at = CURRENT_TIMESTAMP
-        WHERE job_id = :job_id
-    """), {"job_id": "your-job-id"})
+        WHERE job_variants_id = :job_variants_id
+    """), {"job_variants_id": "your-job-variants-id"})
     db.commit()
-    # 자동으로 LLaVA Stage 1이 실행됩니다
+    # 자동으로 vlm_analyze (LLaVA Stage 1)가 실행됩니다
 finally:
     db.close()
 ```
@@ -466,7 +523,8 @@ finally:
 
 ```python
 # 각 단계가 완료되면 자동으로 다음 단계가 실행됩니다
-# img_gen (done) → vlm_analyze (자동) → yolo_detect (자동) → ...
+# img_gen (done) → vlm_analyze (자동) → yolo_detect (자동) → planner (자동) → ...
+# 모든 variants가 iou_eval (done)이면 → ad_copy_gen_kor (자동) → instagram_feed_gen (자동)
 ```
 
 ### 예시 3: 수동 실행과 혼합
@@ -480,11 +538,12 @@ finally:
 
 ## 📚 관련 파일
 
-- **구현 계획**: `IMPLEMENTATION_PLAN_LISTEN_NOTIFY.md`
-- **리스너 서비스**: `services/job_state_listener.py`
-- **트리거 서비스**: `services/pipeline_trigger.py`
-- **테스트 스크립트**: `test/test_listener_team.py`
-- **트리거 검증**: `test/test_trigger_verification.py`
+- **구현 계획**: `IMPLEMENTATION_PLAN_LISTEN_NOTIFY.md` ✅ 업데이트 완료
+- **리스너 서비스**: `services/job_state_listener.py` (v2.3.0)
+- **트리거 서비스**: `services/pipeline_trigger.py` (v2.1.0)
+- **테스트 스크립트**: `test/test_listener_status.py`
+- **YE 파트 트리거 테스트**: `test/test_ye_img_gen_trigger.py`
+- **전체 파이프라인 테스트**: `scripts/background_pipeline_with_text_generation.py`
 
 ---
 

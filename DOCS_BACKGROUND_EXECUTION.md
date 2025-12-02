@@ -4,6 +4,13 @@
 
 Job State Listener는 FastAPI 애플리케이션의 lifespan 이벤트를 통해 자동으로 시작됩니다. 따라서 FastAPI 애플리케이션을 백그라운드로 실행하면 리스너도 함께 백그라운드에서 실행됩니다.
 
+**현재 구현 상태**: ✅ 완료 (v2.3.0)
+- `job_variant_state_changed` 채널 리스닝 (주요)
+- `job_state_changed` 채널 리스닝 (복구용)
+- 자동 재연결 메커니즘
+- 뒤처진 variants 자동 복구
+- 주기적 수동 복구 체크 (1분 간격)
+
 ---
 
 ## 🚀 백그라운드 실행 방법
@@ -138,6 +145,7 @@ docker logs feedlyai-work-yh | grep "Job State Listener"
 # 예상 출력:
 # Job State Listener 시작...
 # ✓ Job State Listener 시작 완료
+# LISTEN 'job_variant_state_changed' 시작
 # LISTEN 'job_state_changed' 시작
 ```
 
