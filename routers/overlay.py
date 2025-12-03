@@ -10,7 +10,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Overlay logic with DB integration
-# version: 2.2.0
+# version: 2.2.1
 # status: production
 # tags: overlay
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -180,7 +180,7 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                             # 위치 다양성을 고려한 proposal 선택 (텍스트 길이 및 forbidden 위치 고려)
                             best_proposal = _select_best_proposal_with_diversity(
                                 proposals_list, logger, 
-                                text=body.text,
+                                ad_text=body.text,
                                 forbidden_position=forbidden_position
                             )
                             
@@ -229,7 +229,7 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                                 # 위치 다양성을 고려한 proposal 선택 (텍스트 길이 및 forbidden 위치 고려)
                                 best_proposal = _select_best_proposal_with_diversity(
                                     proposals_list, logger, 
-                                    text=body.text,
+                                    ad_text=body.text,
                                     forbidden_position=forbidden_position
                                 )
                                 
@@ -1011,7 +1011,7 @@ def _load_font(font_paths: list, size: int) -> ImageFont.FreeTypeFont:
 def _select_best_proposal_with_diversity(
     proposals_list: list, 
     logger, 
-    text: str = None,
+    ad_text: str = None,
     forbidden_position: dict = None
 ) -> dict:
     """
@@ -1021,7 +1021,7 @@ def _select_best_proposal_with_diversity(
     Args:
         proposals_list: proposal 리스트
         logger: 로거 객체
-        text: 오버레이할 텍스트 (Optional, 텍스트 길이 기반 가중치 계산용)
+        ad_text: 오버레이할 텍스트 (Optional, 텍스트 길이 기반 가중치 계산용)
         forbidden_position: Forbidden 영역 위치 정보 (Optional)
             - center_x, center_y: 금지 영역 중심점
             - is_center_x: 금지 영역이 중앙(x축)에 있는지
@@ -1031,8 +1031,8 @@ def _select_best_proposal_with_diversity(
     Returns:
         선택된 proposal 딕셔너리
     """
-    print(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}, text_length={len(text) if text else 'N/A'}")
-    logger.info(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}, text_length={len(text) if text else 'N/A'}")
+    print(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}, text_length={len(ad_text) if ad_text else 'N/A'}")
+    logger.info(f"[위치 선택 함수] 진입: proposals_list 개수={len(proposals_list) if proposals_list else 0}, text_length={len(ad_text) if ad_text else 'N/A'}")
     
     if not proposals_list:
         print(f"[위치 선택 함수] proposals_list가 비어있음")
@@ -1046,8 +1046,8 @@ def _select_best_proposal_with_diversity(
     
     # 텍스트 길이 기반 가중치 계산 (개선: 보너스 최대값 증가)
     text_length_bonus = 0.0
-    if text:
-        text_len = len(text)
+    if ad_text:
+        text_len = len(ad_text)
         # 긴 텍스트(20자 이상)에는 max_size proposal에 보너스 부여
         if text_len >= 20:
             # 텍스트가 길수록 더 큰 보너스 (최대 1.0으로 증가)
@@ -1181,10 +1181,10 @@ def _select_best_proposal_with_diversity(
         return proposals_list[0]
     
     # 매우 긴 텍스트(100자 이상)이고 max_size proposal이 있으면 강제 선택
-    if text and len(text) >= 100 and "max_size" in group_best:
+    if ad_text and len(ad_text) >= 100 and "max_size" in group_best:
         max_size_prop = group_best["max_size"]
-        print(f"[위치 선택 함수] 매우 긴 텍스트({len(text)}자) 감지 → max_size proposal 강제 선택")
-        logger.info(f"[위치 선택 함수] 매우 긴 텍스트({len(text)}자) 감지 → max_size proposal 강제 선택")
+        print(f"[위치 선택 함수] 매우 긴 텍스트({len(ad_text)}자) 감지 → max_size proposal 강제 선택")
+        logger.info(f"[위치 선택 함수] 매우 긴 텍스트({len(ad_text)}자) 감지 → max_size proposal 강제 선택")
         return max_size_prop
     
     groups = list(group_best.keys())
@@ -1213,9 +1213,9 @@ def _select_best_proposal_with_diversity(
     # Softmax 샘플링을 위한 점수 정규화
     # temperature 파라미터: 낮을수록 더 확실한 선택, 높을수록 더 다양성 확보
     # 긴 텍스트일 때는 더 확실하게 선택하도록 temperature 낮춤
-    if text and len(text) >= 100:
+    if ad_text and len(ad_text) >= 100:
         temperature = 0.5  # 매우 긴 텍스트는 더 확실하게 선택
-    elif text and len(text) >= 50:
+    elif ad_text and len(ad_text) >= 50:
         temperature = 0.7  # 긴 텍스트는 중간 정도
     else:
         temperature = 1.0  # 기본값

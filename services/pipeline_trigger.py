@@ -6,7 +6,7 @@ Job 상태 변화에 따라 다음 파이프라인 단계를 자동으로 트리
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Job 상태 변화에 따라 다음 파이프라인 단계를 자동으로 트리거
-# version: 2.2.0
+# version: 2.2.1
 # status: development
 # tags: pipeline, trigger, automation
 # dependencies: httpx, asyncpg
@@ -174,7 +174,7 @@ async def trigger_next_pipeline_stage(
     )
     
     try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
+        async with httpx.AsyncClient(timeout=1800.0) as client:  # 30분 타임아웃
             response = await client.post(api_url, json=request_data)
             response.raise_for_status()
             logger.info(
@@ -242,7 +242,7 @@ async def retry_pipeline_stage(
     )
     
     try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
+        async with httpx.AsyncClient(timeout=1800.0) as client:  # 30분 타임아웃
             response = await client.post(api_url, json=request_data)
             response.raise_for_status()
             logger.info(
@@ -444,7 +444,7 @@ async def trigger_next_pipeline_stage_for_variant(
     )
     
     try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
+        async with httpx.AsyncClient(timeout=1800.0) as client:  # 30분 타임아웃
             response = await client.post(api_url, json=request_data)
             response.raise_for_status()
             logger.info(

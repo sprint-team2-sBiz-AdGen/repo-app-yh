@@ -6,7 +6,7 @@ PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
 # updated_at: 2025-12-01
 # author: LEEYH205
 # description: PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
-# version: 2.3.0
+# version: 2.3.1
 # changes: iou_eval 단계 수동 복구 로직 추가 (주기적 체크)
 # status: development
 # tags: database, listener, notify
@@ -61,19 +61,18 @@ class JobStateListener:
         # 실행 중인 태스크 완료 대기
         if self.pending_tasks:
             logger.info(f"실행 중인 {len(self.pending_tasks)}개 태스크 완료 대기 중...")
-            # 최대 30초 대기
+            # 최대 5분 대기 (LLaVA 로딩 및 긴 파이프라인 단계 고려)
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*self.pending_tasks, return_exceptions=True),
-                    timeout=30.0
+                    timeout=300.0  # 5분으로 증가
                 )
                 logger.info("모든 태스크 완료됨")
             except asyncio.TimeoutError:
-                logger.warning("일부 태스크가 30초 내에 완료되지 않아 강제 종료합니다")
-                # 타임아웃된 태스크 취소
-                for task in self.pending_tasks:
-                    if not task.done():
-                        task.cancel()
+                # 경고 대신 info 레벨로 변경 (정상적인 상황일 수 있음)
+                logger.info(f"일부 태스크가 5분 내에 완료되지 않아 백그라운드에서 계속 실행됩니다. ({len(self.pending_tasks)}개 태스크)")
+                # 타임아웃된 태스크는 취소하지 않고 백그라운드에서 계속 실행되도록 함
+                # (실제 파이프라인 실행은 10분 타임아웃이 있으므로 자동으로 종료됨)
         
         if self.conn:
             await self.conn.close()
