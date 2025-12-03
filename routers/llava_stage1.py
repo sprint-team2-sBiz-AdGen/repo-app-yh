@@ -6,10 +6,10 @@
 # - 관련성 점수 계산
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-28
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: LLaVa Stage 1 validation API
-# version: 1.1.0
+# version: 1.2.0
 # status: production
 # tags: llava, stage1, validation
 # dependencies: fastapi, pydantic, PIL, transformers
@@ -266,7 +266,8 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         request_data = {
             "asset_url": asset_url,  # job_inputs에서 가져온 값 사용
             "ad_copy_text": ad_copy_text,  # job_inputs에서 가져온 값 사용
-            "prompt": validation_prompt
+            "prompt": validation_prompt,
+            "image_asset_id": str(image_asset_id)  # 병렬 실행 시 variant 구분을 위해 추가
         }
         
         # 응답 데이터 구성 (검증 결과)
@@ -276,11 +277,11 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
         db.execute(
             text("""
                 INSERT INTO vlm_traces (
-                    vlm_trace_id, job_id, provider, operation_type, 
+                    vlm_trace_id, job_id, job_variants_id, provider, operation_type, 
                     request, response, latency_ms, created_at, updated_at
                 )
                 VALUES (
-                    :vlm_trace_id, :job_id, :provider, :operation_type,
+                    :vlm_trace_id, :job_id, :job_variants_id, :provider, :operation_type,
                     CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
@@ -288,6 +289,7 @@ def stage1_validate(body: LLaVaStage1In, db: Session = Depends(get_db)):
             {
                 "vlm_trace_id": vlm_trace_id,
                 "job_id": job_id,
+                "job_variants_id": job_variants_id,
                 "provider": "llava",
                 "operation_type": "analyze",
                 "request": json.dumps(request_data),

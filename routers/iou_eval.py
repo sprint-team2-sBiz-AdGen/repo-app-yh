@@ -6,10 +6,10 @@
 # - evaluations 테이블에 결과 저장
 ########################################################
 # created_at: 2025-11-26
-# updated_at: 2025-12-01
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: IoU evaluation API
-# version: 1.2.0
+# version: 1.3.0
 # status: production
 # tags: iou, evaluation
 # dependencies: fastapi, pydantic, sqlalchemy
@@ -144,8 +144,18 @@ def evaluate_iou(body: IoUEvalIn, db: Session = Depends(get_db)):
         )
         
         # Step 2: 음식 바운딩 박스 조회 (detections 테이블)
-        # 같은 job_id의 detections 조회
-        detections = db.query(Detection).filter(Detection.job_id == job_id).all()
+        # 같은 job_id와 image_asset_id의 detections 조회 (병렬 실행 시 다른 variant의 detections 제외)
+        image_asset_id = job_variant.img_asset_id
+        if image_asset_id:
+            detections = db.query(Detection).filter(
+                Detection.job_id == job_id,
+                Detection.image_asset_id == image_asset_id
+            ).all()
+            logger.info(f"Loading detections for job_id={job_id}, image_asset_id={image_asset_id}, found {len(detections)} records")
+        else:
+            # image_asset_id가 없으면 job_id로만 조회 (하위 호환성)
+            detections = db.query(Detection).filter(Detection.job_id == job_id).all()
+            logger.warning(f"image_asset_id not found in job_variant, using job_id only: job_id={job_id}, found {len(detections)} records")
         
         if not detections:
             logger.warning(f"No detections found for job_id={body.job_id}, returning zero IoU")

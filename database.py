@@ -2,10 +2,10 @@
 """데이터베이스 모델 및 세션 관리"""
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-30
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: Database model and session management logic
-# version: 1.1.0
+# version: 1.1.1
 # status: development
 # tags: database
 # dependencies: fastapi, pydantic, PIL, requests
@@ -125,6 +125,7 @@ class VLMTrace(Base):
     
     vlm_trace_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"))
+    job_variants_id = Column(UUID(as_uuid=True), ForeignKey("jobs_variants.job_variants_id"), nullable=True)  # FK: Job Variant 연결 (병렬 실행 시 variant 구분)
     provider = Column(String(255))  # 'llava', etc.
     prompt_id = Column(UUID(as_uuid=True), ForeignKey("vlm_prompt_assets.prompt_asset_id"), nullable=True)  # FK: VLM 프롬프트 참조
     operation_type = Column(String(255))  # 'analyze', 'planner', 'judge'

@@ -9,10 +9,10 @@
 # - job 상태 업데이트
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-30
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: LLaVa Stage 2 validation API
-# version: 1.1.0
+# version: 1.2.0
 # status: production
 # tags: llava, stage2, validation, judge
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -214,11 +214,11 @@ def judge(body: JudgeIn, db: Session = Depends(get_db)):
             db.execute(
                 text("""
                     INSERT INTO vlm_traces (
-                        vlm_trace_id, job_id, provider, operation_type, 
+                        vlm_trace_id, job_id, job_variants_id, provider, operation_type, 
                         request, response, latency_ms, created_at, updated_at
                     )
                     VALUES (
-                        :vlm_trace_id, :job_id, :provider, :operation_type,
+                        :vlm_trace_id, :job_id, :job_variants_id, :provider, :operation_type,
                         CAST(:request AS jsonb), CAST(:response AS jsonb), :latency_ms,
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
@@ -226,6 +226,7 @@ def judge(body: JudgeIn, db: Session = Depends(get_db)):
                 {
                     "vlm_trace_id": vlm_trace_id,
                     "job_id": job_id,
+                    "job_variants_id": job_variants_id,
                     "provider": "llava",
                     "operation_type": "judge",
                     "request": json.dumps(request_data),

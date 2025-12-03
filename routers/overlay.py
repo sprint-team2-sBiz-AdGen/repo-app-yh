@@ -10,7 +10,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Overlay logic with DB integration
-# version: 2.1.0
+# version: 2.2.0
 # status: production
 # tags: overlay
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -298,15 +298,50 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         available_height = padded_bbox[3] - padded_bbox[1]
         
         # Step 2.5: LLaVA 폰트 추천 조회 (vlm_traces에서)
+        # 같은 job_variants_id의 vlm_trace 조회 (병렬 실행 시 다른 variant의 결과 제외)
         font_recommendation = None
-        print(f"[폰트 추천 조회] job_id={job_id}에서 LLaVA 폰트 추천 조회 시작")
-        logger.info(f"[폰트 추천 조회] job_id={job_id}에서 LLaVA 폰트 추천 조회 시작")
+        print(f"[폰트 추천 조회] job_id={job_id}, job_variants_id={job_variants_id}에서 LLaVA 폰트 추천 조회 시작")
+        logger.info(f"[폰트 추천 조회] job_id={job_id}, job_variants_id={job_variants_id}에서 LLaVA 폰트 추천 조회 시작")
         try:
+            # job_variants_id로 직접 조회 (가장 정확)
             vlm_trace = db.query(VLMTrace).filter(
                 VLMTrace.job_id == job_id,
+                VLMTrace.job_variants_id == job_variants_id,
                 VLMTrace.provider == 'llava',
                 VLMTrace.operation_type == 'analyze'
-            ).first()
+            ).order_by(VLMTrace.created_at.desc()).first()
+            
+            # job_variants_id로 찾지 못한 경우 하위 호환성 (기존 데이터)
+            if not vlm_trace:
+                image_asset_id = job_variant.img_asset_id
+                if image_asset_id:
+                    from sqlalchemy import text
+                    vlm_trace_row = db.execute(
+                        text("""
+                            SELECT * FROM vlm_traces
+                            WHERE job_id = :job_id
+                              AND provider = 'llava'
+                              AND operation_type = 'analyze'
+                              AND request->>'image_asset_id' = :image_asset_id
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        """),
+                        {"job_id": str(job_id), "image_asset_id": str(image_asset_id)}
+                    ).first()
+                    
+                    if vlm_trace_row:
+                        vlm_trace = db.query(VLMTrace).filter(
+                            VLMTrace.vlm_trace_id == vlm_trace_row.vlm_trace_id
+                        ).first()
+                        logger.warning(f"job_variants_id로 찾지 못해 image_asset_id로 조회: job_id={job_id}, image_asset_id={image_asset_id}")
+                else:
+                    # 최후의 수단: job_id만 사용
+                    vlm_trace = db.query(VLMTrace).filter(
+                        VLMTrace.job_id == job_id,
+                        VLMTrace.provider == 'llava',
+                        VLMTrace.operation_type == 'analyze'
+                    ).order_by(VLMTrace.created_at.desc()).first()
+                    logger.warning(f"image_asset_id not found, using job_id only: job_id={job_id}")
             
             if vlm_trace:
                 print(f"[폰트 추천 조회] vlm_trace 발견: vlm_trace_id={vlm_trace.vlm_trace_id}, response 존재={vlm_trace.response is not None}")
