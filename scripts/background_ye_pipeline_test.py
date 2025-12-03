@@ -7,10 +7,10 @@
 """
 ########################################################
 # created_at: 2025-12-01
-# updated_at: 2025-12-01
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: YE 파트 파이프라인 테스트용 Background Job Creator
-# version: 1.2.0
+# version: 1.2.1
 ########################################################
 
 import sys
@@ -154,17 +154,18 @@ def create_ye_job_with_variants(
             db.execute(text("""
                 INSERT INTO image_assets (
                     image_asset_id, image_type, image_url, width, height,
-                    tenant_id, created_at, updated_at
+                    tenant_id, job_id, created_at, updated_at
                 ) VALUES (
                     :image_asset_id, 'generated', :asset_url, :width, :height,
-                    :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    :tenant_id, :job_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
             """), {
                 "image_asset_id": image_asset_id,
                 "asset_url": asset_url,
                 "width": image.size[0],
                 "height": image.size[1],
-                "tenant_id": tenant_id
+                "tenant_id": tenant_id,
+                "job_id": str(job_id)
             })
             db.commit()
             logger.info(f"  - 새 image_asset 생성: {image_asset_id}")

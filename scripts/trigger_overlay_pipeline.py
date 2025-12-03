@@ -3,6 +3,13 @@
 트리거 기반 오버레이 파이프라인 스크립트
 Job과 Variants를 생성하고 트리거를 발동시켜 자동으로 파이프라인 진행
 """
+########################################################
+# created_at: 2025-11-28
+# updated_at: 2025-12-03
+# author: LEEYH205
+# description: 트리거 기반 오버레이 파이프라인 스크립트
+# version: 1.0.1
+########################################################
 
 import sys
 import os
@@ -107,17 +114,18 @@ def create_job_with_variants(
                 db.execute(sql_text("""
                     INSERT INTO image_assets (
                         image_asset_id, image_type, image_url, width, height,
-                        tenant_id, created_at, updated_at
+                        tenant_id, job_id, created_at, updated_at
                     ) VALUES (
                         :image_asset_id, 'generated', :image_url, :width, :height,
-                        :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        :tenant_id, :job_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
                 """), {
                     "image_asset_id": image_asset_id,
                     "image_url": asset_url,
                     "width": image.size[0],
                     "height": image.size[1],
-                    "tenant_id": tenant_id
+                    "tenant_id": tenant_id,
+                    "job_id": str(job_id)
                 })
                 db.commit()
                 print(f"  ✓ image_assets 저장: {image_asset_id}")

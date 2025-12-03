@@ -10,7 +10,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Overlay logic with DB integration
-# version: 2.2.2
+# version: 2.2.3
 # status: production
 # tags: overlay
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -671,10 +671,10 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                     text("""
                         INSERT INTO image_assets (
                             image_asset_id, image_type, image_url, width, height,
-                            tenant_id, created_at, updated_at
+                            tenant_id, job_id, created_at, updated_at
                         ) VALUES (
                             :image_asset_id, 'overlaid', :image_url, :width, :height,
-                            :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                            :tenant_id, :job_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                         )
                     """),
                     {
@@ -682,7 +682,8 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                         "image_url": result_url,
                         "width": meta.get('width'),
                         "height": meta.get('height'),
-                        "tenant_id": body.tenant_id
+                        "tenant_id": body.tenant_id,
+                        "job_id": str(job_id)
                     }
                 )
                 logger.info(f"New image_asset created for overlay: image_asset_id={overlaid_img_asset_id}, url={result_url}")

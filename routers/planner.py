@@ -12,7 +12,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Planner logic
-# version: 2.2.0
+# version: 2.2.1
 # status: development
 # tags: planner
 # dependencies: fastapi, pydantic, PIL, requests
@@ -416,10 +416,10 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                         text("""
                             INSERT INTO image_assets (
                                 image_asset_id, image_type, image_url, width, height,
-                                tenant_id, created_at, updated_at
+                                tenant_id, job_id, created_at, updated_at
                             ) VALUES (
                                 :image_asset_id, 'planner', :image_url, :width, :height,
-                                :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                                :tenant_id, :job_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                             )
                         """),
                         {
@@ -427,7 +427,8 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                             "image_url": proposal_image_url,
                             "width": asset_meta["width"],
                             "height": asset_meta["height"],
-                            "tenant_id": body.tenant_id
+                            "tenant_id": body.tenant_id,
+                            "job_id": str(job_id)
                         }
                     )
                     db.commit()

@@ -4,10 +4,10 @@
 """
 ########################################################
 # created_at: 2025-11-28
-# updated_at: 2025-11-28
+# updated_at: 2025-12-03
 # author: LEEYH205
 # description: 백그라운드 Job 생성 스크립트
-# version: 2.0.0
+# version: 2.0.1
 ########################################################
 
 import sys
@@ -155,16 +155,17 @@ def create_job_with_variants(
                 image_asset_id = uuid.uuid4()
                 db.execute(text("""
                     INSERT INTO image_assets (
-                        image_asset_id, image_type, image_url, width, height, tenant_id, created_at, updated_at
+                        image_asset_id, image_type, image_url, width, height, tenant_id, job_id, created_at, updated_at
                     ) VALUES (
-                        :image_asset_id, 'generated', :asset_url, :width, :height, :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        :image_asset_id, 'generated', :asset_url, :width, :height, :tenant_id, :job_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
                 """), {
                     "image_asset_id": image_asset_id,
                     "asset_url": asset_url,
                     "width": image.size[0],
                     "height": image.size[1],
-                    "tenant_id": tenant_id
+                    "tenant_id": tenant_id,
+                    "job_id": str(job_id)
                 })
                 db.commit()
             

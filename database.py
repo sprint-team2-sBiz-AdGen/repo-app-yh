@@ -5,7 +5,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Database model and session management logic
-# version: 1.1.1
+# version: 1.1.2
 # status: development
 # tags: database
 # dependencies: fastapi, pydantic, PIL, requests
@@ -57,6 +57,7 @@ class ImageAsset(Base):
     height = Column(Integer)
     creator_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True)
     tenant_id = Column(String(255), ForeignKey("tenants.tenant_id"), nullable=True)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.job_id"), nullable=True)  # FK: Job 연결 (선택적)
     pk = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

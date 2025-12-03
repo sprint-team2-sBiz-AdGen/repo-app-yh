@@ -8,6 +8,14 @@
   * 오버레이에는 한글 광고문구(ad_copy_kor) 사용
   * 피드글 생성에는 한글 광고문구를 이용하여 GPT로 한글 피드글 생성
 """
+########################################################
+# created_at: 2025-11-28
+# updated_at: 2025-12-03
+# author: LEEYH205
+# description: YH 파트 전체 파이프라인 테스트 (텍스트 생성 포함)
+# version: 1.0.1
+########################################################
+
 import sys
 import os
 import uuid
@@ -111,26 +119,7 @@ def create_test_job_with_js_data(
         asset_url = asset_meta["url"]
         print(f"  - Asset URL: {asset_url}")
         
-        # 3. image_assets 레코드 생성
-        image_asset_id = uuid.uuid4()
-        db.execute(text("""
-            INSERT INTO image_assets (
-                image_asset_id, image_type, image_url, width, height,
-                tenant_id, created_at, updated_at
-            ) VALUES (
-                :image_asset_id, 'generated', :image_url, :width, :height,
-                :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-            )
-        """), {
-            "image_asset_id": image_asset_id,
-            "image_url": asset_url,
-            "width": image.size[0],
-            "height": image.size[1],
-            "tenant_id": tenant_id
-        })
-        print(f"✓ image_assets 레코드 생성: {image_asset_id}")
-        
-        # 4. tone_style_id 조회 (기본값 사용)
+        # 3. tone_style_id 조회 (기본값 사용)
         print(f"\n[3/8] Tone Style 확인 중...")
         tone_style_row = db.execute(text("""
             SELECT tone_style_id, kor_name
@@ -145,7 +134,7 @@ def create_test_job_with_js_data(
         else:
             print(f"⚠ Tone Style 없음 (NULL 사용)")
         
-        # 5. store_id 조회 또는 생성 (선택적)
+        # 4. store_id 조회 또는 생성 (선택적)
         print(f"\n[4/8] Store 확인 중...")
         store_row = db.execute(text("""
             SELECT store_id
@@ -160,7 +149,7 @@ def create_test_job_with_js_data(
         else:
             print(f"⚠ Store 없음 (NULL 사용)")
         
-        # 6. Job 생성
+        # 5. Job 생성 (image_assets 생성 전에 job_id 확보)
         print(f"\n[5/8] Job 생성 중...")
         job_id = uuid.uuid4()
         db.execute(text("""
@@ -179,8 +168,30 @@ def create_test_job_with_js_data(
         print(f"✓ Job 생성: {job_id}")
         print(f"  - status=done, current_step=img_gen")
         
+        # 6. image_assets 레코드 생성 (job_id 포함)
+        print(f"\n[6/8] image_assets 레코드 생성 중...")
+        image_asset_id = uuid.uuid4()
+        db.execute(text("""
+            INSERT INTO image_assets (
+                image_asset_id, image_type, image_url, width, height,
+                tenant_id, job_id, created_at, updated_at
+            ) VALUES (
+                :image_asset_id, 'generated', :image_url, :width, :height,
+                :tenant_id, :job_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+        """), {
+            "image_asset_id": image_asset_id,
+            "image_url": asset_url,
+            "width": image.size[0],
+            "height": image.size[1],
+            "tenant_id": tenant_id,
+            "job_id": str(job_id)
+        })
+        db.commit()
+        print(f"✓ image_assets 레코드 생성: {image_asset_id}")
+        
         # 7. job_inputs 생성
-        print(f"\n[6/8] Job Inputs 생성 중...")
+        print(f"\n[7/8] Job Inputs 생성 중...")
         db.execute(text("""
             INSERT INTO job_inputs (
                 job_id, img_asset_id, tone_style_id, desc_kor,
