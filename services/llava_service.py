@@ -14,7 +14,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: LLaVa model service
-# version: 2.1.0
+# version: 2.2.0
 # status: development
 # tags: llava, model, service
 # dependencies: transformers, torch, accelerate, pillow
@@ -186,15 +186,43 @@ def process_image_with_llava(
     if DEVICE == "cuda":
         inputs = {k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
     
-    # 추론
-    with torch.no_grad():
-        generate_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=do_sample,
-            pad_token_id=processor.tokenizer.eos_token_id if processor.tokenizer.pad_token_id is None else processor.tokenizer.pad_token_id
-        )
+    # 추론 (bitsandbytes 컨텍스트 에러 재시도)
+    max_retries = 3
+    retry_count = 0
+    generate_ids = None
+    
+    while retry_count < max_retries:
+        try:
+            with torch.no_grad():
+                generate_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    do_sample=do_sample,
+                    pad_token_id=processor.tokenizer.eos_token_id if processor.tokenizer.pad_token_id is None else processor.tokenizer.pad_token_id
+                )
+            break  # 성공하면 루프 종료
+        except AttributeError as e:
+            if "'CUBLAS_Context' object has no attribute 'context'" in str(e):
+                retry_count += 1
+                if retry_count < max_retries:
+                    print(f"⚠ bitsandbytes 컨텍스트 에러 발생, 재시도 {retry_count}/{max_retries}...")
+                    # GPU 컨텍스트 정리 후 재시도
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
+                    import time
+                    time.sleep(0.5)  # 짧은 대기 후 재시도
+                else:
+                    print(f"❌ bitsandbytes 컨텍스트 에러 재시도 실패: {e}")
+                    raise
+            else:
+                raise
+        except Exception as e:
+            # 다른 에러는 즉시 전파
+            raise
+    
+    if generate_ids is None:
+        raise RuntimeError("모델 추론 실패: 최대 재시도 횟수 초과")
     
     # GPU 메모리 정리
     if DEVICE == "cuda":
