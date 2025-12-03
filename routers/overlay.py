@@ -10,7 +10,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Overlay logic with DB integration
-# version: 2.2.1
+# version: 2.2.2
 # status: production
 # tags: overlay
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -315,7 +315,6 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             if not vlm_trace:
                 image_asset_id = job_variant.img_asset_id
                 if image_asset_id:
-                    from sqlalchemy import text
                     vlm_trace_row = db.execute(
                         text("""
                             SELECT * FROM vlm_traces
