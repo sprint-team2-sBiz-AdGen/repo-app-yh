@@ -366,22 +366,40 @@ async def trigger_next_pipeline_stage_for_variant(
 ):
     """다음 파이프라인 단계 트리거 (job_variants_id 기반)"""
     
-    # 트리거 조건 확인
-    if not current_step or status != 'done':
+    # 트리거 조건 확인: done 또는 queued 상태 허용
+    # queued 상태는 현재 단계를 실행해야 하는 상태 (예: vlm_analyze, queued → vlm_analyze API 호출)
+    if not current_step or status not in ['done', 'queued']:
         logger.debug(
             f"트리거 조건 불만족: job_variants_id={job_variants_id}, "
-            f"current_step={current_step}, status={status}"
+            f"current_step={current_step}, status={status} (done 또는 queued 필요)"
         )
         return
     
     # 다음 단계 정보 조회
-    stage_info = PIPELINE_STAGES.get((current_step, status))
-    if not stage_info:
-        logger.debug(
-            f"다음 단계 없음: job_variants_id={job_variants_id}, "
-            f"current_step={current_step}, status={status}"
+    # queued 상태일 때는 현재 단계를 실행해야 하므로, (current_step, 'done') 매핑을 사용
+    # (queued → running → done 흐름에서 done 상태의 매핑을 재사용)
+    if status == 'queued':
+        # queued 상태는 현재 단계를 실행하는 상태이므로, done 상태의 매핑을 사용
+        stage_info = PIPELINE_STAGES.get((current_step, 'done'))
+        if not stage_info:
+            logger.debug(
+                f"다음 단계 없음 (queued 상태): job_variants_id={job_variants_id}, "
+                f"current_step={current_step}"
+            )
+            return
+        logger.info(
+            f"queued 상태에서 현재 단계 실행: job_variants_id={job_variants_id}, "
+            f"current_step={current_step}, next_step={stage_info['next_step']}"
         )
-        return
+    else:
+        # done 상태일 때는 일반적인 다음 단계 매핑 사용
+        stage_info = PIPELINE_STAGES.get((current_step, status))
+        if not stage_info:
+            logger.debug(
+                f"다음 단계 없음: job_variants_id={job_variants_id}, "
+                f"current_step={current_step}, status={status}"
+            )
+            return
     
     # Job 레벨 단계인 경우 variant 레벨 트리거에서 스킵
     # (Job 레벨 단계는 모든 variants 완료 후 Job 레벨 트리거에서 처리)
@@ -395,10 +413,12 @@ async def trigger_next_pipeline_stage_for_variant(
         return
     
     # 중복 실행 방지: job_variant 상태 재확인
-    if not await _verify_job_variant_state(job_variants_id, current_step, status, tenant_id):
+    # queued 상태일 때는 queued 상태로 확인 (현재 단계 실행 중)
+    verify_status = status if status == 'queued' else status
+    if not await _verify_job_variant_state(job_variants_id, current_step, verify_status, tenant_id):
         logger.info(
             f"Job Variant 상태가 변경되어 스킵: job_variants_id={job_variants_id}, "
-            f"expected: current_step={current_step}, status={status}"
+            f"expected: current_step={current_step}, status={verify_status}"
         )
         return
     
