@@ -11,7 +11,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Planner service for text overlay position proposal
-# version: 1.1.0
+# version: 1.3.0
 # status: development
 # tags: planner, service
 # dependencies: pillow, numpy
@@ -223,8 +223,23 @@ def propose_overlay_positions(
     else:
         logger.warning(f"[Planner] max_size_proposal을 찾지 못했습니다")
     
-    # avoid 영역 (첫 번째 금지 영역 또는 None)
-    avoid = avoid_regions[0] if avoid_regions else None
+    # avoid 영역: 모든 금지 영역을 포함하는 바운딩 박스 계산
+    avoid = None
+    if avoid_regions:
+        # 모든 금지 영역의 최소/최대 좌표 계산
+        min_x = min(reg[0] for reg in avoid_regions)
+        min_y = min(reg[1] for reg in avoid_regions)
+        max_x = max(reg[0] + reg[2] for reg in avoid_regions)  # x + width
+        max_y = max(reg[1] + reg[3] for reg in avoid_regions)  # y + height
+        
+        # 바운딩 박스: [x, y, width, height]
+        avoid = [
+            min_x,
+            min_y,
+            max_x - min_x,  # width
+            max_y - min_y   # height
+        ]
+        logger.info(f"[Planner] 모든 금지 영역을 포함하는 바운딩 박스: avoid={avoid} (금지 영역 개수: {len(avoid_regions)})")
     
     # Forbidden 영역의 공간적 위치 분석
     forbidden_position_info = None

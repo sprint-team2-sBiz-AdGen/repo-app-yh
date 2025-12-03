@@ -12,7 +12,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Planner logic
-# version: 2.0.0
+# version: 2.2.0
 # status: development
 # tags: planner
 # dependencies: fastapi, pydantic, PIL, requests
@@ -168,14 +168,20 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
         forbidden_mask = None
         
         if not detections:
-            # yolo_runs에서 메타데이터 가져오기
-            yolo_run = db.query(YOLORun).filter(YOLORun.job_id == job_id).first()
+            # yolo_runs에서 메타데이터 가져오기 (image_asset_id로 필터링)
+            yolo_run = db.query(YOLORun).filter(
+                YOLORun.job_id == job_id,
+                YOLORun.image_asset_id == image_asset_id
+            ).first()
             
             if yolo_run:
-                # detections 테이블에서 감지 결과 가져오기
+                # detections 테이블에서 감지 결과 가져오기 (image_asset_id로 필터링)
                 detection_records = db.query(Detection).filter(
-                    Detection.job_id == job_id
+                    Detection.job_id == job_id,
+                    Detection.image_asset_id == image_asset_id
                 ).order_by(Detection.created_at).all()
+                
+                logger.info(f"Loading detections for job_id={job_id}, image_asset_id={image_asset_id}, found {len(detection_records)} records")
                 
                 if detection_records:
                     boxes = []
@@ -259,7 +265,69 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                         font = ImageFont.load_default()
                 
                 # 금지 영역 그리기 (빨간색)
-                if result.get("avoid"):
+                # detections에서 모든 금지 영역 박스 가져오기
+                avoid_regions = []
+                if detections and detections.get("boxes"):
+                    logger.info(f"[Planner Image] YOLO 감지 박스 개수: {len(detections['boxes'])}")
+                    for box in detections["boxes"]:
+                        x1, y1, x2, y2 = box
+                        # 정규화된 xywh로 변환
+                        ax = max(0.0, min(1.0, x1 / w))
+                        ay = max(0.0, min(1.0, y1 / h))
+                        aw = min(1.0, (x2 - x1) / w)
+                        ah = min(1.0, (y2 - y1) / h)
+                        avoid_regions.append([ax, ay, aw, ah])
+                        logger.debug(f"[Planner Image] 금지 영역 추가: [{ax:.3f}, {ay:.3f}, {aw:.3f}, {ah:.3f}]")
+                else:
+                    # detections가 없으면 DB에서 직접 가져오기 (image_asset_id로 필터링)
+                    try:
+                        detection_records = db.query(Detection).filter(
+                            Detection.job_id == job_id,
+                            Detection.image_asset_id == image_asset_id
+                        ).all()
+                        if detection_records:
+                            logger.info(f"[Planner Image] DB에서 {len(detection_records)}개의 감지 결과 로드")
+                            for det in detection_records:
+                                box = det.box if isinstance(det.box, list) else det.box
+                                if box and len(box) == 4:
+                                    x1, y1, x2, y2 = box
+                                    # 정규화된 xywh로 변환
+                                    ax = max(0.0, min(1.0, x1 / w))
+                                    ay = max(0.0, min(1.0, y1 / h))
+                                    aw = min(1.0, (x2 - x1) / w)
+                                    ah = min(1.0, (y2 - y1) / h)
+                                    avoid_regions.append([ax, ay, aw, ah])
+                                    logger.debug(f"[Planner Image] DB에서 금지 영역 추가: [{ax:.3f}, {ay:.3f}, {aw:.3f}, {ah:.3f}]")
+                    except Exception as e:
+                        logger.warning(f"[Planner Image] DB에서 감지 결과 로드 실패: {e}")
+                
+                # 모든 금지 영역 그리기 (각각 개별적으로)
+                if avoid_regions:
+                    logger.info(f"[Planner Image] {len(avoid_regions)}개의 금지 영역을 개별적으로 그림")
+                    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+                    overlay_draw = ImageDraw.Draw(overlay)
+                    
+                    for i, (ax, ay, aw, ah) in enumerate(avoid_regions):
+                        ax_px = int(ax * w)
+                        ay_px = int(ay * h)
+                        aw_px = int(aw * w)
+                        ah_px = int(ah * h)
+                        
+                        # 각 금지 영역을 개별적으로 그리기
+                        overlay_draw.rectangle(
+                            [ax_px, ay_px, ax_px + aw_px, ay_px + ah_px],
+                            fill=(255, 0, 0, 50),
+                            outline="red",
+                            width=3
+                        )
+                        # 라벨 추가
+                        overlay_draw.text((ax_px + 5, ay_px + 5), f"AVOID {i+1}", fill="red", font=font)
+                    
+                    proposal_image = Image.alpha_composite(proposal_image, overlay)
+                    draw = ImageDraw.Draw(proposal_image)
+                # fallback: avoid 값이 있으면 사용 (이전 방식 - 모든 금지 영역을 포함하는 바운딩 박스)
+                elif result.get("avoid"):
+                    logger.info(f"[Planner Image] detections가 없어서 result.avoid 사용 (바운딩 박스)")
                     avoid = result.get("avoid")
                     if isinstance(avoid, list) and len(avoid) == 4:
                         ax, ay, aw, ah = avoid
