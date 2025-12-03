@@ -11,7 +11,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Planner service for text overlay position proposal
-# version: 1.4.0
+# version: 1.5.0
 # status: development
 # tags: planner, service
 # dependencies: pillow, numpy
@@ -771,6 +771,7 @@ def _find_max_size_proposal(
             avoid_y_min = min(reg[1] for reg in avoid_regions)
             avoid_x_max = max(reg[0] + reg[2] for reg in avoid_regions)
             avoid_y_max = max(reg[1] + reg[3] for reg in avoid_regions)
+            logger.info(f"[Planner] 금지 영역 경계: x=[{avoid_x_min:.3f}, {avoid_x_max:.3f}], y=[{avoid_y_min:.3f}, {avoid_y_max:.3f}]")
         else:
             # mask_array만 있는 경우, 마스크에서 경계 찾기
             if mask_array is not None:
@@ -782,6 +783,7 @@ def _find_max_size_proposal(
                     avoid_y_max = float(len(rows) - np.argmax(rows[::-1])) / h if np.any(rows) else 1.0
                     avoid_x_min = float(np.argmax(cols)) / w if np.any(cols) else 0.0
                     avoid_x_max = float(len(cols) - np.argmax(cols[::-1])) / w if np.any(cols) else 1.0
+                    logger.info(f"[Planner] 마스크 기반 금지 영역 경계: x=[{avoid_x_min:.3f}, {avoid_x_max:.3f}], y=[{avoid_y_min:.3f}, {avoid_y_max:.3f}]")
                 else:
                     avoid_x_min = avoid_y_min = 0.0
                     avoid_x_max = avoid_y_max = 1.0
@@ -792,41 +794,56 @@ def _find_max_size_proposal(
         # 가능한 최대 영역들 시도 (금지 영역을 피한 영역만)
         candidate_regions = []
         
-        # 상단 영역 (금지 영역 위쪽)
+        # 상단 영역 (금지 영역 위쪽) - 금지 영역과 겹치지 않도록 여유 공간 추가
         if avoid_y_min > min_height:
-            candidate_regions.append({
-                "x": 0.0, "y": 0.0, "width": 1.0, "height": avoid_y_min, "name": "top_full"
-            })
+            # 금지 영역 위쪽에 충분한 공간이 있는지 확인
+            safe_height = max(0.0, avoid_y_min - 0.01)  # 1% 여유 공간
+            if safe_height >= min_height:
+                candidate_regions.append({
+                    "x": 0.0, "y": 0.0, "width": 1.0, "height": safe_height, "name": "top_full"
+                })
         
-        # 하단 영역 (금지 영역 아래쪽)
-        if (1.0 - avoid_y_max) > min_height:
-            candidate_regions.append({
-                "x": 0.0, "y": avoid_y_max, "width": 1.0, "height": 1.0 - avoid_y_max, "name": "bottom_full"
-            })
+        # 하단 영역 (금지 영역 아래쪽) - 금지 영역과 겹치지 않도록 여유 공간 추가
+        bottom_available = 1.0 - avoid_y_max
+        if bottom_available > min_height:
+            safe_y = min(1.0, avoid_y_max + 0.01)  # 1% 여유 공간
+            safe_height = 1.0 - safe_y
+            if safe_height >= min_height:
+                candidate_regions.append({
+                    "x": 0.0, "y": safe_y, "width": 1.0, "height": safe_height, "name": "bottom_full"
+                })
         
-        # 좌측 영역 (금지 영역 왼쪽)
+        # 좌측 영역 (금지 영역 왼쪽) - 금지 영역과 겹치지 않도록 여유 공간 추가
         if avoid_x_min > min_width:
-            candidate_regions.append({
-                "x": 0.0, "y": 0.0, "width": avoid_x_min, "height": 1.0, "name": "left_full"
-            })
+            safe_width = max(0.0, avoid_x_min - 0.01)  # 1% 여유 공간
+            if safe_width >= min_width:
+                candidate_regions.append({
+                    "x": 0.0, "y": 0.0, "width": safe_width, "height": 1.0, "name": "left_full"
+                })
         
-        # 우측 영역 (금지 영역 오른쪽)
-        if (1.0 - avoid_x_max) > min_width:
-            candidate_regions.append({
-                "x": avoid_x_max, "y": 0.0, "width": 1.0 - avoid_x_max, "height": 1.0, "name": "right_full"
-            })
+        # 우측 영역 (금지 영역 오른쪽) - 금지 영역과 겹치지 않도록 여유 공간 추가
+        right_available = 1.0 - avoid_x_max
+        if right_available > min_width:
+            safe_x = min(1.0, avoid_x_max + 0.01)  # 1% 여유 공간
+            safe_width = 1.0 - safe_x
+            if safe_width >= min_width:
+                candidate_regions.append({
+                    "x": safe_x, "y": 0.0, "width": safe_width, "height": 1.0, "name": "right_full"
+                })
         
         # 금지 영역이 이미지를 거의 다 덮는 경우, 빈 영역이 없으면 None 반환
         if not candidate_regions:
             logger.warning(f"[Planner] 금지 영역이 너무 커서 max_size proposal을 생성할 수 없습니다")
             return None
+        
+        logger.info(f"[Planner] 생성된 candidate_regions: {len(candidate_regions)}개")
     else:
         # 금지 영역이 없으면 전체 영역 시도
         candidate_regions = [
             {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0, "name": "full"},
         ]
     
-    # 각 후보 영역에서 최대 크기 찾기
+    # 각 후보 영역에서 최대 크기 찾기 (상단, 하단, 좌측, 우측 중 가장 큰 영역 선택)
     for region in candidate_regions:
         x = region["x"]
         y = region["y"]
@@ -850,20 +867,26 @@ def _find_max_size_proposal(
         # 금지 영역과의 IoU 확인
         iou = _compute_forbidden_iou(x, y, width, height, avoid_regions, mask_array, w, h)
         
+        logger.info(f"[Planner] candidate region {name}: xywh=[{x:.3f}, {y:.3f}, {width:.3f}, {height:.3f}], IoU={iou:.4f}, max_forbidden_iou={max_forbidden_iou}")
+        
         if iou <= max_forbidden_iou:
             area = width * height
             if area > max_area:
                 max_area = area
+                # 금지 영역이 있을 때는 가장 큰 영역을 max_size_full로 반환
                 best_proposal = {
                     "proposal_id": str(uuid.uuid4()),
                     "xywh": [x, y, width, height],
-                    "source": f"max_size_{name}",
+                    "source": "max_size_full",  # 항상 max_size_full로 설정
                     "color": "0d0d0dff",
                     "size": 32,
                     "score": 1.0,
                     "occlusion_iou": iou,
                     "area": area
                 }
+                logger.info(f"[Planner] 새로운 best_proposal: {name} -> max_size_full, area={area:.4f}, IoU={iou:.4f}")
+        else:
+            logger.warning(f"[Planner] candidate region {name} rejected: IoU={iou:.4f} > max_forbidden_iou={max_forbidden_iou}")
     
     # 추가: 더 세밀한 탐색 (금지 영역 주변의 최적 크기 찾기)
     if avoid_regions:
@@ -886,7 +909,7 @@ def _find_max_size_proposal(
                             best_proposal = {
                                 "proposal_id": str(uuid.uuid4()),
                                 "xywh": [x, y, width, height],
-                                "source": f"max_size_top_optimized",
+                                "source": "max_size_full",  # 항상 max_size_full로 설정
                                 "color": "0d0d0dff",
                                 "size": 32,
                                 "score": 1.0,
@@ -914,7 +937,7 @@ def _find_max_size_proposal(
                             best_proposal = {
                                 "proposal_id": str(uuid.uuid4()),
                                 "xywh": [x, y, width, height],
-                                "source": f"max_size_bottom_optimized",
+                                "source": "max_size_full",  # 항상 max_size_full로 설정
                                 "color": "0d0d0dff",
                                 "size": 32,
                                 "score": 1.0,
