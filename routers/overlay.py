@@ -10,7 +10,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Overlay logic with DB integration
-# version: 2.0.0
+# version: 2.1.0
 # status: production
 # tags: overlay
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -551,6 +551,7 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
             # layout JSONB 데이터 구성
             layout_data = {
                 "text": body.text,
+                "wrapped_text": wrapped_text,  # 줄바꿈된 텍스트 저장
                 "x_align": body.x_align,
                 "y_align": body.y_align,
                 "text_size": body.text_size,
@@ -836,7 +837,8 @@ def _wrap_text(
     max_width: int,
 ) -> str:
     """
-    텍스트를 단어 단위로 나누어서 max_width에 맞게 줄바꿈 (old/overlay.py의 _wrap_text 로직)
+    텍스트를 단어 단위로 나누어서 max_width에 맞게 줄바꿈
+    쉼표(,)나 마침표(.) 뒤에서 자연스러운 줄바꿈 우선 고려
     
     Args:
         draw: ImageDraw 객체
@@ -854,7 +856,7 @@ def _wrap_text(
     lines: list = []
     current: list = []
     
-    for word in words:
+    for i, word in enumerate(words):
         test_line = " ".join(current + [word]) if current else word
         
         # 텍스트 너비 계산
@@ -868,12 +870,79 @@ def _wrap_text(
                 # 최후의 수단: 대략적인 계산
                 width = len(test_line) * font.size // 2
         
-        if width <= max_width or not current:
-            current.append(word)
+        # 너비가 초과하는 경우
+        if width > max_width:
+            if not current:
+                # 첫 단어도 너비 초과하면 그냥 추가 (강제)
+                current.append(word)
+            else:
+                # 현재 줄을 저장하고 새 줄 시작
+                # 쉼표나 마침표 뒤에서 줄바꿈이 자연스러운지 확인
+                should_break_at_punctuation = False
+                
+                # 현재 줄의 마지막 단어에 쉼표나 마침표가 있는지 확인
+                if current:
+                    last_word = current[-1]
+                    # 쉼표나 마침표로 끝나는 경우 (한글/영문 모두 지원)
+                    if (last_word.endswith(',') or last_word.endswith('.') or 
+                        last_word.endswith('，') or last_word.endswith('。')):
+                        should_break_at_punctuation = True
+                        logger.debug(f"[줄바꿈] 구두점 뒤에서 자연스러운 줄바꿈: '{last_word}'")
+                
+                # 현재 줄 저장
+                lines.append(" ".join(current))
+                
+                # 새 줄 시작
+                current = [word]
+                
+                # 구두점 뒤에서 줄바꿈한 경우 로그
+                if should_break_at_punctuation:
+                    logger.debug(f"[줄바꿈] 구두점 뒤에서 줄바꿈 완료")
         else:
-            lines.append(" ".join(current))
-            current = [word]
+            # 너비가 초과하지 않으면 현재 줄에 추가
+            current.append(word)
+            
+            # 쉼표나 마침표 뒤에서 자연스러운 줄바꿈 고려
+            # 현재 단어가 구두점으로 끝나는 경우, 구두점 뒤에서 줄바꿈 우선 고려
+            if (word.endswith(',') or word.endswith('.') or 
+                word.endswith('，') or word.endswith('。')):
+                # 다음 단어가 있는지 확인
+                if i + 1 < len(words):
+                    next_word = words[i + 1]
+                    # 다음 단어를 추가한 경우의 너비 확인
+                    test_with_next = " ".join(current + [next_word])
+                    try:
+                        bbox_next = draw.textbbox((0, 0), test_with_next, font=font)
+                        width_with_next = bbox_next[2] - bbox_next[0]
+                    except AttributeError:
+                        try:
+                            width_with_next, _ = draw.textsize(test_with_next, font=font)
+                        except:
+                            width_with_next = len(test_with_next) * font.size // 2
+                    
+                    # 구두점 뒤에서 줄바꿈 조건:
+                    # 1. 다음 단어를 추가하면 너비를 초과하는 경우
+                    # 2. 현재 너비가 max_width의 50% 이상인 경우 (자연스러운 줄바꿈) - 70%에서 50%로 완화
+                    # 3. 구두점 뒤에서 항상 줄바꿈 고려 (너비가 충분해도 구두점 뒤에서 줄바꿈)
+                    should_break = False
+                    if width_with_next > max_width:
+                        should_break = True
+                        logger.info(f"[줄바꿈] 구두점 뒤에서 예방적 줄바꿈: '{word}' 다음에 '{next_word}' 추가 시 너비 초과 예상 (현재: {width:.1f}/{max_width}, 다음: {width_with_next:.1f}/{max_width})")
+                    elif width >= max_width * 0.5:  # 70%에서 50%로 완화
+                        should_break = True
+                        logger.info(f"[줄바꿈] 구두점 뒤에서 자연스러운 줄바꿈: '{word}' (현재 너비: {width:.1f}/{max_width}, {width/max_width*100:.1f}% 사용)")
+                    else:
+                        # 너비가 충분해도 구두점 뒤에서 줄바꿈 고려 (특히 쉼표의 경우)
+                        # 단, 너비가 너무 작으면(30% 미만) 줄바꿈하지 않음
+                        if width >= max_width * 0.3 and word.endswith(','):
+                            should_break = True
+                            logger.info(f"[줄바꿈] 구두점(쉼표) 뒤에서 강제 줄바꿈: '{word}' (현재 너비: {width:.1f}/{max_width}, {width/max_width*100:.1f}% 사용)")
+                    
+                    if should_break:
+                        lines.append(" ".join(current))
+                        current = []
     
+    # 마지막 줄 추가
     if current:
         lines.append(" ".join(current))
     

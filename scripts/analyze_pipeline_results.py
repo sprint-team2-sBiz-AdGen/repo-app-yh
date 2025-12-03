@@ -84,7 +84,7 @@ def analyze_job(job_id: str, db: SessionLocal):
         overlay = db.execute(text('''
             SELECT 
                 ol.overlay_id,
-                ol.layout->>'text' as text,
+                ol.layout,
                 ol.x_ratio,
                 ol.y_ratio,
                 ol.width_ratio,
@@ -97,7 +97,10 @@ def analyze_job(job_id: str, db: SessionLocal):
         '''), {'variant_id': variant_id}).first()
         
         if overlay:
-            overlay_id, text_val, x, y, w, h, proposal_id = overlay
+            overlay_id, layout_json, x, y, w, h, proposal_id = overlay
+            layout = json.loads(layout_json) if isinstance(layout_json, str) else layout_json
+            text_val = layout.get('text', '') if isinstance(layout, dict) else ''
+            wrapped_text = layout.get('wrapped_text', None) if isinstance(layout, dict) else None
             text_len = len(text_val) if text_val else 0
             
             print(f'\n📋 Overlay 정보:')
@@ -106,6 +109,27 @@ def analyze_job(job_id: str, db: SessionLocal):
             print(f'  - 텍스트 길이: {text_len}자')
             print(f'  - 위치: x={float(x):.3f}, y={float(y):.3f}, w={float(w):.3f}, h={float(h):.3f}')
             print(f'  - Proposal ID: {proposal_id}')
+            
+            # wrapped_text 정보 출력
+            if wrapped_text:
+                lines = wrapped_text.split('\n')
+                print(f'\n📝 줄바꿈된 텍스트 ({len(lines)}줄):')
+                for i, line in enumerate(lines, 1):
+                    print(f'  {i}: "{line}"')
+                    if ',' in line:
+                        comma_pos = line.find(',')
+                        is_at_end = comma_pos == len(line) - 1
+                        print(f'    → 쉼표 위치: {comma_pos} (줄 끝: {is_at_end})')
+                        if is_at_end:
+                            print(f'    ✅ 쉼표가 줄 끝에 있음 - 다음 줄로 넘어갔을 가능성')
+                    if '.' in line:
+                        period_pos = line.find('.')
+                        is_at_end = period_pos == len(line) - 1
+                        print(f'    → 마침표 위치: {period_pos} (줄 끝: {is_at_end})')
+                        if is_at_end:
+                            print(f'    ✅ 마침표가 줄 끝에 있음 - 다음 줄로 넘어갔을 가능성')
+            else:
+                print(f'\n⚠️ wrapped_text 필드가 없습니다! (줄바꿈 정보 확인 불가)')
             
             # Planner Proposal 정보
             proposal = db.execute(text('''
@@ -194,17 +218,20 @@ def analyze_job(job_id: str, db: SessionLocal):
                                 print(f'\n⚠️ max_size proposal이 선택되지 않았습니다.')
                                 print(f'   선택된: {source}')
                             
-                            # 모든 proposals 표시 (조정 후 점수)
-                            print(f'\n📊 모든 Proposals (조정 후 점수):')
+                            # 모든 proposals 표시 (원래 점수와 조정 후 점수)
+                            print(f'\n📊 모든 Proposals 상세 점수:')
                             sorted_props = sorted(proposals, key=lambda x: x.get('score', 0), reverse=True)
                             
                             for i, prop in enumerate(sorted_props[:10], 1):
                                 prop_source = prop.get('source', 'unknown')
-                                prop_score = prop.get('score', 0)
+                                original_score = prop.get('score', 0)
+                                prop_score = original_score
                                 
                                 # max_size면 보너스 추가
+                                bonus_text = ''
                                 if 'max_size' in prop_source.lower() and text_length_bonus > 0:
                                     prop_score += text_length_bonus
+                                    bonus_text += f' +{text_length_bonus:.2f}(텍스트길이)'
                                 
                                 # Forbidden 위치 기반 보너스/페널티
                                 if forbidden_pos:
@@ -216,13 +243,22 @@ def analyze_job(job_id: str, db: SessionLocal):
                                         
                                         if 'bottom' in prop_source.lower() and is_top_y:
                                             prop_score += 0.3
+                                            bonus_text += f' +0.30(Forbidden위치)'
                                         if 'top' in prop_source.lower() and is_bottom_y:
                                             prop_score += 0.3
+                                            bonus_text += f' +0.30(Forbidden위치)'
                                         if ('left' in prop_source.lower() or 'right' in prop_source.lower()) and is_center_x:
                                             prop_score -= 0.3
+                                            bonus_text += f' -0.30(Forbidden위치)'
                                 
                                 marker = '👉' if prop == selected_prop else '  '
-                                print(f'{marker} {i}. {prop_source} - 원래: {prop.get("score", 0):.2f}, 조정 후: {prop_score:.2f}')
+                                print(f'{marker} {i}. {prop_source}')
+                                print(f'     원래 점수: {original_score:.2f}{bonus_text}')
+                                print(f'     조정 후 점수: {prop_score:.2f}')
+                                print(f'     위치: {prop.get("xywh", [])}')
+                                if prop == selected_prop:
+                                    print(f'     ✅ 선택됨 (차이: {min_diff:.4f})')
+                                print()
             
             # 평가 결과
             print(f'\n📊 평가 결과:')
