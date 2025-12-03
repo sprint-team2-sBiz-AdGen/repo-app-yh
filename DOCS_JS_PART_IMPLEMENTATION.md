@@ -6,7 +6,7 @@
 
 **작성일**: 2025-12-01  
 **최종 수정일**: 2025-12-01  
-**버전**: 1.2.0  
+**버전**: 1.3.0  
 **작성자**: LEEYH205
 
 ---
@@ -234,9 +234,9 @@ LIMIT 1
        status = 'done',
        updated_at = CURRENT_TIMESTAMP
    ```
-6. `jobs` 테이블 업데이트:
+6. `llm_traces` 테이블 업데이트:
    ```sql
-   UPDATE jobs
+   UPDATE llm_traces
    SET current_step = 'ad_copy_gen_eng',
        status = 'done',
        updated_at = CURRENT_TIMESTAMP
