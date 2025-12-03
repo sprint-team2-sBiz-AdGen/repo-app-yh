@@ -11,7 +11,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Planner service for text overlay position proposal
-# version: 1.3.0
+# version: 1.4.0
 # status: development
 # tags: planner, service
 # dependencies: pillow, numpy
@@ -763,24 +763,63 @@ def _find_max_size_proposal(
     max_area = 0.0
     
     # 금지 영역 분석: 금지 영역 주변의 빈 공간 찾기
-    if avoid_regions:
+    if avoid_regions or mask_array is not None:
+        # 금지 영역이 있으면 전체 영역을 절대 사용하지 않음
         # 금지 영역의 경계 찾기
-        avoid_x_min = min(reg[0] for reg in avoid_regions)
-        avoid_y_min = min(reg[1] for reg in avoid_regions)
-        avoid_x_max = max(reg[0] + reg[2] for reg in avoid_regions)
-        avoid_y_max = max(reg[1] + reg[3] for reg in avoid_regions)
+        if avoid_regions:
+            avoid_x_min = min(reg[0] for reg in avoid_regions)
+            avoid_y_min = min(reg[1] for reg in avoid_regions)
+            avoid_x_max = max(reg[0] + reg[2] for reg in avoid_regions)
+            avoid_y_max = max(reg[1] + reg[3] for reg in avoid_regions)
+        else:
+            # mask_array만 있는 경우, 마스크에서 경계 찾기
+            if mask_array is not None:
+                mask_binary = mask_array > 128
+                if np.any(mask_binary):
+                    rows = np.any(mask_binary, axis=1)
+                    cols = np.any(mask_binary, axis=0)
+                    avoid_y_min = float(np.argmax(rows)) / h if np.any(rows) else 0.0
+                    avoid_y_max = float(len(rows) - np.argmax(rows[::-1])) / h if np.any(rows) else 1.0
+                    avoid_x_min = float(np.argmax(cols)) / w if np.any(cols) else 0.0
+                    avoid_x_max = float(len(cols) - np.argmax(cols[::-1])) / w if np.any(cols) else 1.0
+                else:
+                    avoid_x_min = avoid_y_min = 0.0
+                    avoid_x_max = avoid_y_max = 1.0
+            else:
+                avoid_x_min = avoid_y_min = 0.0
+                avoid_x_max = avoid_y_max = 1.0
         
-        # 가능한 최대 영역들 시도
-        candidate_regions = [
-            # 상단 영역 (금지 영역 위쪽)
-            {"x": 0.0, "y": 0.0, "width": 1.0, "height": avoid_y_min, "name": "top_full"},
-            # 하단 영역 (금지 영역 아래쪽)
-            {"x": 0.0, "y": avoid_y_max, "width": 1.0, "height": 1.0 - avoid_y_max, "name": "bottom_full"},
-            # 좌측 영역 (금지 영역 왼쪽)
-            {"x": 0.0, "y": 0.0, "width": avoid_x_min, "height": 1.0, "name": "left_full"},
-            # 우측 영역 (금지 영역 오른쪽)
-            {"x": avoid_x_max, "y": 0.0, "width": 1.0 - avoid_x_max, "height": 1.0, "name": "right_full"},
-        ]
+        # 가능한 최대 영역들 시도 (금지 영역을 피한 영역만)
+        candidate_regions = []
+        
+        # 상단 영역 (금지 영역 위쪽)
+        if avoid_y_min > min_height:
+            candidate_regions.append({
+                "x": 0.0, "y": 0.0, "width": 1.0, "height": avoid_y_min, "name": "top_full"
+            })
+        
+        # 하단 영역 (금지 영역 아래쪽)
+        if (1.0 - avoid_y_max) > min_height:
+            candidate_regions.append({
+                "x": 0.0, "y": avoid_y_max, "width": 1.0, "height": 1.0 - avoid_y_max, "name": "bottom_full"
+            })
+        
+        # 좌측 영역 (금지 영역 왼쪽)
+        if avoid_x_min > min_width:
+            candidate_regions.append({
+                "x": 0.0, "y": 0.0, "width": avoid_x_min, "height": 1.0, "name": "left_full"
+            })
+        
+        # 우측 영역 (금지 영역 오른쪽)
+        if (1.0 - avoid_x_max) > min_width:
+            candidate_regions.append({
+                "x": avoid_x_max, "y": 0.0, "width": 1.0 - avoid_x_max, "height": 1.0, "name": "right_full"
+            })
+        
+        # 금지 영역이 이미지를 거의 다 덮는 경우, 빈 영역이 없으면 None 반환
+        if not candidate_regions:
+            logger.warning(f"[Planner] 금지 영역이 너무 커서 max_size proposal을 생성할 수 없습니다")
+            return None
     else:
         # 금지 영역이 없으면 전체 영역 시도
         candidate_regions = [
