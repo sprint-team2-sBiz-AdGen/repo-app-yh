@@ -2,10 +2,10 @@
 """Pydantic 모델 정의"""
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-11-28   
+# updated_at: 2025-12-03   
 # author: LEEYH205
 # description: Pydantic models
-# version: 1.1.0
+# version: 1.2.0
 # status: development
 # tags: pydantic
 # dependencies: fastapi, pydantic, PIL, requests
@@ -70,7 +70,7 @@ class ProposalOut(BaseModel):
 class PlannerOut(BaseModel):
     """Planner 응답 모델"""
     proposals: List[ProposalOut]  # 제안 리스트
-    avoid: Optional[List[float]] = None  # 금지 영역 [x, y, width, height] (정규화된 좌표)
+    forbidden: Optional[List[float]] = None  # 금지 영역 [x, y, width, height] (정규화된 좌표) - avoid -> forbidden으로 변경
     min_overlay_width: Optional[float] = 0.5  # 최소 오버레이 너비 비율 (0-1)
     min_overlay_height: Optional[float] = 0.12  # 최소 오버레이 높이 비율 (0-1)
     max_proposals: Optional[int] = 10  # 최대 제안 개수
@@ -92,7 +92,7 @@ class ProposalOut(BaseModel):
 class PlannerOut(BaseModel):
     """Planner 응답 모델"""
     proposals: List[ProposalOut]  # 제안 리스트
-    avoid: Optional[List[float]] = None  # 금지 영역 [x, y, width, height] (정규화된 좌표)
+    forbidden: Optional[List[float]] = None  # 금지 영역 [x, y, width, height] (정규화된 좌표) - avoid -> forbidden으로 변경
 
 
 class OverlayIn(BaseModel):

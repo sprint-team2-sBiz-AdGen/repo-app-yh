@@ -325,21 +325,21 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                     
                     proposal_image = Image.alpha_composite(proposal_image, overlay)
                     draw = ImageDraw.Draw(proposal_image)
-                # fallback: avoid 값이 있으면 사용 (이전 방식 - 모든 금지 영역을 포함하는 바운딩 박스)
-                elif result.get("avoid"):
-                    logger.info(f"[Planner Image] detections가 없어서 result.avoid 사용 (바운딩 박스)")
-                    avoid = result.get("avoid")
-                    if isinstance(avoid, list) and len(avoid) == 4:
-                        ax, ay, aw, ah = avoid
-                        ax_px = int(ax * w)
-                        ay_px = int(ay * h)
-                        aw_px = int(aw * w)
-                        ah_px = int(ah * h)
+                # fallback: forbidden 값이 있으면 사용 (이전 방식 - 모든 금지 영역을 포함하는 바운딩 박스)
+                elif result.get("forbidden"):
+                    logger.info(f"[Planner Image] detections가 없어서 result.forbidden 사용 (바운딩 박스)")
+                    forbidden = result.get("forbidden")
+                    if isinstance(forbidden, list) and len(forbidden) == 4:
+                        fx, fy, fw, fh = forbidden
+                        fx_px = int(fx * w)
+                        fy_px = int(fy * h)
+                        fw_px = int(fw * w)
+                        fh_px = int(fh * h)
                         # 반투명 빨간색 배경
                         overlay = Image.new("RGBA", (w, h), (255, 0, 0, 50))
                         overlay_draw = ImageDraw.Draw(overlay)
                         overlay_draw.rectangle(
-                            [ax_px, ay_px, ax_px + aw_px, ay_px + ah_px],
+                            [fx_px, fy_px, fx_px + fw_px, fy_px + fh_px],
                             fill=(255, 0, 0, 50),
                             outline="red",
                             width=3
@@ -347,7 +347,7 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                         proposal_image = Image.alpha_composite(proposal_image, overlay)
                         draw = ImageDraw.Draw(proposal_image)
                         # 라벨 추가
-                        draw.text((ax_px + 5, ay_px + 5), "AVOID", fill="red", font=font)
+                        draw.text((fx_px + 5, fy_px + 5), "FORBIDDEN", fill="red", font=font)
                 
                 # Proposal box 그리기 (다양한 색상)
                 colors = [
@@ -451,7 +451,7 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
                 import json
                 layout_data = {
                     "proposals": [prop.dict() if hasattr(prop, 'dict') else prop for prop in proposals],
-                    "avoid": result.get("avoid"),
+                    "forbidden": result.get("forbidden"),  # avoid -> forbidden으로 변경
                     "forbidden_position": result.get("forbidden_position"),  # Forbidden 영역 위치 정보 추가
                     "min_overlay_width": body.min_overlay_width,
                     "min_overlay_height": body.min_overlay_height,
@@ -512,7 +512,7 @@ def planner(body: PlannerIn, db: Session = Depends(get_db)):
         
         return PlannerOut(
             proposals=proposals,
-            avoid=result.get("avoid")
+            forbidden=result.get("forbidden")  # avoid -> forbidden으로 변경
         )
         
     except HTTPException:

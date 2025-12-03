@@ -11,7 +11,7 @@
 # updated_at: 2025-12-03
 # author: LEEYH205
 # description: Planner service for text overlay position proposal
-# version: 1.5.0
+# version: 1.6.0
 # status: development
 # tags: planner, service
 # dependencies: pillow, numpy
@@ -35,7 +35,7 @@ def propose_overlay_positions(
     min_overlay_width: float = 0.5,
     min_overlay_height: float = 0.12,
     max_proposals: int = 10,
-    max_forbidden_iou: float = 0.05  # 겹치지 않도록
+    max_forbidden_iou: float = 0.0  # 완전히 겹치지 않도록 (0.0 = 겹침 없음)
 ) -> Dict[str, Any]:
     """
     텍스트 오버레이 위치 제안
@@ -52,13 +52,13 @@ def propose_overlay_positions(
     Returns:
         {
             "proposals": [{"proposal_id": str, "xywh": [x, y, w, h], "color": str, "size": int, "source": str, "score": float}],
-            "avoid": [x, y, w, h] (normalized xywh)
+            "forbidden": [x, y, w, h] (normalized xywh)
         }
     """
     w, h = image.size
     
     # 금지 영역 계산
-    avoid_regions = []
+    forbidden_regions = []
     if detections and detections.get("boxes"):
         # 모든 박스를 정규화된 xywh 형식으로 변환
         for box in detections["boxes"]:
@@ -67,7 +67,7 @@ def propose_overlay_positions(
             y = max(0.0, min(1.0, y1 / h))
             width = min(1.0, (x2 - x1) / w)
             height = min(1.0, (y2 - y1) / h)
-            avoid_regions.append([x, y, width, height])
+            forbidden_regions.append([x, y, width, height])
     
     # 금지 영역 마스크가 있으면 사용
     mask_array = None
@@ -78,10 +78,10 @@ def propose_overlay_positions(
             mask_array = np.array(forbidden_mask)
     
     # 여러 위치 후보 생성 (금지 영역을 제외한 영역에서)
-    logger.info(f"[Planner] 후보 생성 시작: w={w}, h={h}, avoid_regions={len(avoid_regions) if avoid_regions else 0}, mask_array={mask_array is not None}")
+    logger.info(f"[Planner] 후보 생성 시작: w={w}, h={h}, forbidden_regions={len(forbidden_regions) if forbidden_regions else 0}, mask_array={mask_array is not None}")
     candidates = _generate_position_candidates(
         w, h,
-        avoid_regions,
+        forbidden_regions,
         mask_array,
         min_overlay_width,
         min_overlay_height,
@@ -98,7 +98,7 @@ def propose_overlay_positions(
         # 금지 영역과의 IoU 계산
         occlusion_iou = _compute_forbidden_iou(
             x, y, width, height,
-            avoid_regions,
+            forbidden_regions,
             mask_array,
             w, h
         )
@@ -120,7 +120,7 @@ def propose_overlay_positions(
         candidate_ious = []
         for candidate in candidates:
             x, y, width, height = candidate["xywh"]
-            iou = _compute_forbidden_iou(x, y, width, height, avoid_regions, mask_array, w, h)
+            iou = _compute_forbidden_iou(x, y, width, height, forbidden_regions, mask_array, w, h)
             candidate_ious.append((candidate, iou))
         # IoU가 가장 낮은 candidate 선택 (하지만 가능하면 IoU가 0.0에 가까운 것)
         candidate_ious.sort(key=lambda x: x[1])
@@ -207,7 +207,7 @@ def propose_overlay_positions(
     # 추가: 금지 영역과 겹치지 않는 최대 크기 제안
     max_size_proposal = _find_max_size_proposal(
         w, h,
-        avoid_regions,
+        forbidden_regions,
         mask_array,
         min_overlay_width,
         min_overlay_height,
@@ -223,43 +223,43 @@ def propose_overlay_positions(
     else:
         logger.warning(f"[Planner] max_size_proposal을 찾지 못했습니다")
     
-    # avoid 영역: 모든 금지 영역을 포함하는 바운딩 박스 계산
-    avoid = None
-    if avoid_regions:
+    # forbidden 영역: 모든 금지 영역을 포함하는 바운딩 박스 계산
+    forbidden = None
+    if forbidden_regions:
         # 모든 금지 영역의 최소/최대 좌표 계산
-        min_x = min(reg[0] for reg in avoid_regions)
-        min_y = min(reg[1] for reg in avoid_regions)
-        max_x = max(reg[0] + reg[2] for reg in avoid_regions)  # x + width
-        max_y = max(reg[1] + reg[3] for reg in avoid_regions)  # y + height
+        min_x = min(reg[0] for reg in forbidden_regions)
+        min_y = min(reg[1] for reg in forbidden_regions)
+        max_x = max(reg[0] + reg[2] for reg in forbidden_regions)  # x + width
+        max_y = max(reg[1] + reg[3] for reg in forbidden_regions)  # y + height
         
         # 바운딩 박스: [x, y, width, height]
-        avoid = [
+        forbidden = [
             min_x,
             min_y,
             max_x - min_x,  # width
             max_y - min_y   # height
         ]
-        logger.info(f"[Planner] 모든 금지 영역을 포함하는 바운딩 박스: avoid={avoid} (금지 영역 개수: {len(avoid_regions)})")
+        logger.info(f"[Planner] 모든 금지 영역을 포함하는 바운딩 박스: forbidden={forbidden} (금지 영역 개수: {len(forbidden_regions)})")
     
     # Forbidden 영역의 공간적 위치 분석
     forbidden_position_info = None
-    if avoid_regions:
+    if forbidden_regions:
         # 모든 금지 영역의 중심점과 경계 계산
-        all_avoid_x = []
-        all_avoid_y = []
-        all_avoid_w = []
-        all_avoid_h = []
+        all_forbidden_x = []
+        all_forbidden_y = []
+        all_forbidden_w = []
+        all_forbidden_h = []
         
-        for reg in avoid_regions:
-            ax, ay, aw, ah = reg
-            all_avoid_x.append(ax + aw / 2)  # 중심 x
-            all_avoid_y.append(ay + ah / 2)  # 중심 y
-            all_avoid_w.append(aw)
-            all_avoid_h.append(ah)
+        for reg in forbidden_regions:
+            fx, fy, fw, fh = reg
+            all_forbidden_x.append(fx + fw / 2)  # 중심 x
+            all_forbidden_y.append(fy + fh / 2)  # 중심 y
+            all_forbidden_w.append(fw)
+            all_forbidden_h.append(fh)
         
         # 평균 중심점
-        avg_center_x = sum(all_avoid_x) / len(all_avoid_x) if all_avoid_x else 0.5
-        avg_center_y = sum(all_avoid_y) / len(all_avoid_y) if all_avoid_y else 0.5
+        avg_center_x = sum(all_forbidden_x) / len(all_forbidden_x) if all_forbidden_x else 0.5
+        avg_center_y = sum(all_forbidden_y) / len(all_forbidden_y) if all_forbidden_y else 0.5
         
         # 금지 영역이 중앙에 있는지 판단 (x 좌표가 0.3~0.7 범위)
         is_center_x = 0.3 <= avg_center_x <= 0.7
@@ -282,14 +282,14 @@ def propose_overlay_positions(
     
     return {
         "proposals": proposals,
-        "avoid": avoid,
+        "forbidden": forbidden,
         "forbidden_position": forbidden_position_info
     }
 
 
 def _propose_top_banner(
     w: int, h: int,
-    avoid_regions: List[List[float]],
+    forbidden_regions: List[List[float]],
     mask_array: Optional[np.ndarray],
     min_width: float,
     min_height: float
@@ -302,23 +302,23 @@ def _propose_top_banner(
     height = 0.18
     
     # 금지 영역과 겹치는지 확인
-    if _overlaps_with_forbidden(x, y, width, height, avoid_regions, mask_array, w, h):
+    if _overlaps_with_forbidden(x, y, width, height, forbidden_regions, mask_array, w, h):
         # 겹치면 위치 조정 시도
         # 상단을 더 좁게 하거나, 금지 영역 아래로 이동
-        if avoid_regions:
-            first_avoid = avoid_regions[0]
-            avoid_y = first_avoid[1]
-            avoid_height = first_avoid[3]
-            avoid_bottom = avoid_y + avoid_height
+        if forbidden_regions:
+            first_forbidden = forbidden_regions[0]
+            forbidden_y = first_forbidden[1]
+            forbidden_height = first_forbidden[3]
+            forbidden_bottom = forbidden_y + forbidden_height
             
             # 금지 영역이 상단에 있으면 더 위로 이동
-            if avoid_bottom < 0.3:
-                height = min(0.15, avoid_y - 0.02)
+            if forbidden_bottom < 0.3:
+                height = min(0.15, forbidden_y - 0.02)
                 if height < min_height:
                     return None
             else:
                 # 금지 영역이 중앙에 있으면 상단을 더 좁게
-                height = min(0.12, avoid_y - 0.02)
+                height = min(0.12, forbidden_y - 0.02)
                 if height < min_height:
                     return None
     
@@ -336,7 +336,7 @@ def _propose_top_banner(
 
 def _propose_bottom_banner(
     w: int, h: int,
-    avoid_regions: List[List[float]],
+    forbidden_regions: List[List[float]],
     mask_array: Optional[np.ndarray],
     min_width: float,
     min_height: float
@@ -347,20 +347,20 @@ def _propose_bottom_banner(
     width = 0.8
     height = 0.18
     
-    if _overlaps_with_forbidden(x, y, width, height, avoid_regions, mask_array, w, h):
-        if avoid_regions:
-            first_avoid = avoid_regions[0]
-            avoid_y = first_avoid[1]
-            avoid_bottom = avoid_y + first_avoid[3]
+    if _overlaps_with_forbidden(x, y, width, height, forbidden_regions, mask_array, w, h):
+        if forbidden_regions:
+            first_forbidden = forbidden_regions[0]
+            forbidden_y = first_forbidden[1]
+            forbidden_bottom = forbidden_y + first_forbidden[3]
             
             # 금지 영역이 하단에 있으면 더 아래로 이동
-            if avoid_y > 0.7:
-                y = min(0.95 - height, avoid_bottom + 0.02)
+            if forbidden_y > 0.7:
+                y = min(0.95 - height, forbidden_bottom + 0.02)
                 if y + height > 1.0 or height < min_height:
                     return None
             else:
                 # 금지 영역이 중앙에 있으면 하단을 더 좁게
-                height = min(0.12, 1.0 - (avoid_bottom + 0.02))
+                height = min(0.12, 1.0 - (forbidden_bottom + 0.02))
                 y = 1.0 - height
                 if height < min_height:
                     return None
@@ -379,7 +379,7 @@ def _propose_bottom_banner(
 
 def _propose_left_banner(
     w: int, h: int,
-    avoid_regions: List[List[float]],
+    forbidden_regions: List[List[float]],
     mask_array: Optional[np.ndarray],
     min_width: float,
     min_height: float
@@ -390,16 +390,16 @@ def _propose_left_banner(
     width = 0.15
     height = 0.8
     
-    if _overlaps_with_forbidden(x, y, width, height, avoid_regions, mask_array, w, h):
-        if avoid_regions:
-            first_avoid = avoid_regions[0]
-            avoid_x = first_avoid[0]
-            avoid_width = first_avoid[2]
-            avoid_right = avoid_x + avoid_width
+    if _overlaps_with_forbidden(x, y, width, height, forbidden_regions, mask_array, w, h):
+        if forbidden_regions:
+            first_forbidden = forbidden_regions[0]
+            forbidden_x = first_forbidden[0]
+            forbidden_width = first_forbidden[2]
+            forbidden_right = forbidden_x + forbidden_width
             
             # 금지 영역이 좌측에 있으면 더 좁게
-            if avoid_right < 0.3:
-                width = min(0.12, avoid_x - 0.02)
+            if forbidden_right < 0.3:
+                width = min(0.12, forbidden_x - 0.02)
                 if width < min_width:
                     return None
     
@@ -417,7 +417,7 @@ def _propose_left_banner(
 
 def _propose_right_banner(
     w: int, h: int,
-    avoid_regions: List[List[float]],
+    forbidden_regions: List[List[float]],
     mask_array: Optional[np.ndarray],
     min_width: float,
     min_height: float
@@ -428,14 +428,14 @@ def _propose_right_banner(
     width = 0.15
     height = 0.8
     
-    if _overlaps_with_forbidden(x, y, width, height, avoid_regions, mask_array, w, h):
-        if avoid_regions:
-            first_avoid = avoid_regions[0]
-            avoid_x = first_avoid[0]
+    if _overlaps_with_forbidden(x, y, width, height, forbidden_regions, mask_array, w, h):
+        if forbidden_regions:
+            first_forbidden = forbidden_regions[0]
+            forbidden_x = first_forbidden[0]
             
             # 금지 영역이 우측에 있으면 더 좁게
-            if avoid_x > 0.7:
-                width = min(0.12, 1.0 - (avoid_x + 0.02))
+            if forbidden_x > 0.7:
+                width = min(0.12, 1.0 - (forbidden_x + 0.02))
                 x = 1.0 - width
                 if width < min_width:
                     return None
@@ -454,13 +454,13 @@ def _propose_right_banner(
 
 def _propose_center_top(
     w: int, h: int,
-    avoid_regions: List[List[float]],
+    forbidden_regions: List[List[float]],
     mask_array: Optional[np.ndarray],
     min_width: float,
     min_height: float
 ) -> Optional[Dict[str, Any]]:
     """중앙 상단 위치 제안 (금지 영역이 없는 경우)"""
-    if avoid_regions or mask_array is not None:
+    if forbidden_regions or mask_array is not None:
         # 금지 영역이 있으면 중앙 상단 제안하지 않음
         return None
     
@@ -480,7 +480,7 @@ def _propose_center_top(
 
 def _generate_position_candidates(
     w: int, h: int,
-    avoid_regions: List[List[float]],
+    forbidden_regions: List[List[float]],
     mask_array: Optional[np.ndarray],
     min_width: float,
     min_height: float,
@@ -492,7 +492,7 @@ def _generate_position_candidates(
     Args:
         w: 이미지 너비
         h: 이미지 높이
-        avoid_regions: 금지 영역 리스트
+        forbidden_regions: 금지 영역 리스트
         mask_array: 금지 영역 마스크
         min_width: 최소 너비 비율
         min_height: 최소 높이 비율
@@ -520,7 +520,7 @@ def _generate_position_candidates(
     candidates.extend(fixed_candidates)
     
     # 2. 그리드 기반 후보 생성 (금지 영역이 있는 경우)
-    if avoid_regions or mask_array is not None:
+    if forbidden_regions or mask_array is not None:
         # 다양한 크기 조합 시도 (금지 영역을 피하기 위해 다양한 크기 필요)
         size_combinations = [
             (0.8, 0.18),  # 넓은 배너 (상단/하단용)
@@ -573,16 +573,16 @@ def _generate_position_candidates(
             key_positions.append((0.0, 0.0, "top"))
         
         # 중앙 영역 (금지 영역을 피하기 위해)
-        if avoid_regions:
-            avoid_y_min = min(reg[1] for reg in avoid_regions)
-            avoid_y_max = max(reg[1] + reg[3] for reg in avoid_regions)
+        if forbidden_regions:
+            forbidden_y_min = min(reg[1] for reg in forbidden_regions)
+            forbidden_y_max = max(reg[1] + reg[3] for reg in forbidden_regions)
             # 금지 영역 위쪽 중앙
-            if avoid_y_min > height + 0.1:
-                mid_y = (avoid_y_min - height) / 2
+            if forbidden_y_min > height + 0.1:
+                mid_y = (forbidden_y_min - height) / 2
                 key_positions.append(((1.0 - width) / 2, mid_y, "mid_top"))
             # 금지 영역 아래쪽 중앙
-            if avoid_y_max + height < 0.9:
-                mid_y = min(avoid_y_max + 0.05, 1.0 - height)
+            if forbidden_y_max + height < 0.9:
+                mid_y = min(forbidden_y_max + 0.05, 1.0 - height)
                 key_positions.append(((1.0 - width) / 2, mid_y, "mid_bottom"))
         else:
             # 금지 영역이 없으면 중앙 시도
@@ -658,7 +658,7 @@ def _generate_position_candidates(
 
 def _compute_forbidden_iou(
     x: float, y: float, width: float, height: float,
-    avoid_regions: List[List[float]],
+    forbidden_regions: List[List[float]],
     mask_array: Optional[np.ndarray],
     img_w: int, img_h: int
 ) -> float:
@@ -667,7 +667,7 @@ def _compute_forbidden_iou(
     
     Args:
         x, y, width, height: 제안 영역 (정규화된 좌표)
-        avoid_regions: 금지 영역 리스트
+        forbidden_regions: 금지 영역 리스트
         mask_array: 금지 영역 마스크
         img_w, img_h: 이미지 크기
     
@@ -684,21 +684,21 @@ def _compute_forbidden_iou(
     max_iou = 0.0
     
     # 박스 기반 금지 영역과의 IoU 계산
-    for avoid in avoid_regions:
-        avoid_x, avoid_y, avoid_w, avoid_h = avoid
-        avoid_right = avoid_x + avoid_w
-        avoid_bottom = avoid_y + avoid_h
-        avoid_area = avoid_w * avoid_h
+    for forbidden in forbidden_regions:
+        forbidden_x, forbidden_y, forbidden_w, forbidden_h = forbidden
+        forbidden_right = forbidden_x + forbidden_w
+        forbidden_bottom = forbidden_y + forbidden_h
+        forbidden_area = forbidden_w * forbidden_h
         
         # 교집합 계산
-        intersection_x1 = max(x, avoid_x)
-        intersection_y1 = max(y, avoid_y)
-        intersection_x2 = min(proposal_right, avoid_right)
-        intersection_y2 = min(proposal_bottom, avoid_bottom)
+        intersection_x1 = max(x, forbidden_x)
+        intersection_y1 = max(y, forbidden_y)
+        intersection_x2 = min(proposal_right, forbidden_right)
+        intersection_y2 = min(proposal_bottom, forbidden_bottom)
         
         if intersection_x2 > intersection_x1 and intersection_y2 > intersection_y1:
             intersection_area = (intersection_x2 - intersection_x1) * (intersection_y2 - intersection_y1)
-            union_area = proposal_area + avoid_area - intersection_area
+            union_area = proposal_area + forbidden_area - intersection_area
             
             if union_area > 0:
                 iou = intersection_area / union_area
@@ -739,7 +739,7 @@ def _compute_forbidden_iou(
 
 def _find_max_size_proposal(
     w: int, h: int,
-    avoid_regions: List[List[float]],
+    forbidden_regions: List[List[float]],
     mask_array: Optional[np.ndarray],
     min_width: float,
     min_height: float,
@@ -750,7 +750,7 @@ def _find_max_size_proposal(
     
     Args:
         w, h: 이미지 크기
-        avoid_regions: 금지 영역 리스트
+        forbidden_regions: 금지 영역 리스트
         mask_array: 금지 영역 마스크
         min_width: 최소 너비 비율
         min_height: 최소 높이 비율
@@ -763,15 +763,15 @@ def _find_max_size_proposal(
     max_area = 0.0
     
     # 금지 영역 분석: 금지 영역 주변의 빈 공간 찾기
-    if avoid_regions or mask_array is not None:
+    if forbidden_regions or mask_array is not None:
         # 금지 영역이 있으면 전체 영역을 절대 사용하지 않음
         # 금지 영역의 경계 찾기
-        if avoid_regions:
-            avoid_x_min = min(reg[0] for reg in avoid_regions)
-            avoid_y_min = min(reg[1] for reg in avoid_regions)
-            avoid_x_max = max(reg[0] + reg[2] for reg in avoid_regions)
-            avoid_y_max = max(reg[1] + reg[3] for reg in avoid_regions)
-            logger.info(f"[Planner] 금지 영역 경계: x=[{avoid_x_min:.3f}, {avoid_x_max:.3f}], y=[{avoid_y_min:.3f}, {avoid_y_max:.3f}]")
+        if forbidden_regions:
+            forbidden_x_min = min(reg[0] for reg in forbidden_regions)
+            forbidden_y_min = min(reg[1] for reg in forbidden_regions)
+            forbidden_x_max = max(reg[0] + reg[2] for reg in forbidden_regions)
+            forbidden_y_max = max(reg[1] + reg[3] for reg in forbidden_regions)
+            logger.info(f"[Planner] 금지 영역 경계: x=[{forbidden_x_min:.3f}, {forbidden_x_max:.3f}], y=[{forbidden_y_min:.3f}, {forbidden_y_max:.3f}]")
         else:
             # mask_array만 있는 경우, 마스크에서 경계 찾기
             if mask_array is not None:
@@ -779,52 +779,53 @@ def _find_max_size_proposal(
                 if np.any(mask_binary):
                     rows = np.any(mask_binary, axis=1)
                     cols = np.any(mask_binary, axis=0)
-                    avoid_y_min = float(np.argmax(rows)) / h if np.any(rows) else 0.0
-                    avoid_y_max = float(len(rows) - np.argmax(rows[::-1])) / h if np.any(rows) else 1.0
-                    avoid_x_min = float(np.argmax(cols)) / w if np.any(cols) else 0.0
-                    avoid_x_max = float(len(cols) - np.argmax(cols[::-1])) / w if np.any(cols) else 1.0
-                    logger.info(f"[Planner] 마스크 기반 금지 영역 경계: x=[{avoid_x_min:.3f}, {avoid_x_max:.3f}], y=[{avoid_y_min:.3f}, {avoid_y_max:.3f}]")
+                    forbidden_y_min = float(np.argmax(rows)) / h if np.any(rows) else 0.0
+                    forbidden_y_max = float(len(rows) - np.argmax(rows[::-1])) / h if np.any(rows) else 1.0
+                    forbidden_x_min = float(np.argmax(cols)) / w if np.any(cols) else 0.0
+                    forbidden_x_max = float(len(cols) - np.argmax(cols[::-1])) / w if np.any(cols) else 1.0
+                    logger.info(f"[Planner] 마스크 기반 금지 영역 경계: x=[{forbidden_x_min:.3f}, {forbidden_x_max:.3f}], y=[{forbidden_y_min:.3f}, {forbidden_y_max:.3f}]")
                 else:
-                    avoid_x_min = avoid_y_min = 0.0
-                    avoid_x_max = avoid_y_max = 1.0
+                    forbidden_x_min = forbidden_y_min = 0.0
+                    forbidden_x_max = forbidden_y_max = 1.0
             else:
-                avoid_x_min = avoid_y_min = 0.0
-                avoid_x_max = avoid_y_max = 1.0
+                forbidden_x_min = forbidden_y_min = 0.0
+                forbidden_x_max = forbidden_y_max = 1.0
         
         # 가능한 최대 영역들 시도 (금지 영역을 피한 영역만)
         candidate_regions = []
         
-        # 상단 영역 (금지 영역 위쪽) - 금지 영역과 겹치지 않도록 여유 공간 추가
-        if avoid_y_min > min_height:
+        # 상단 영역 (금지 영역 위쪽) - 금지 영역과 완전히 겹치지 않도록 충분한 여유 공간 추가
+        if forbidden_y_min > min_height:
             # 금지 영역 위쪽에 충분한 공간이 있는지 확인
-            safe_height = max(0.0, avoid_y_min - 0.01)  # 1% 여유 공간
+            # 여유 공간을 더 크게 설정하여 완전히 겹치지 않도록 함
+            safe_height = max(0.0, forbidden_y_min - 0.02)  # 2% 여유 공간으로 증가
             if safe_height >= min_height:
                 candidate_regions.append({
                     "x": 0.0, "y": 0.0, "width": 1.0, "height": safe_height, "name": "top_full"
                 })
         
-        # 하단 영역 (금지 영역 아래쪽) - 금지 영역과 겹치지 않도록 여유 공간 추가
-        bottom_available = 1.0 - avoid_y_max
+        # 하단 영역 (금지 영역 아래쪽) - 금지 영역과 완전히 겹치지 않도록 충분한 여유 공간 추가
+        bottom_available = 1.0 - forbidden_y_max
         if bottom_available > min_height:
-            safe_y = min(1.0, avoid_y_max + 0.01)  # 1% 여유 공간
+            safe_y = min(1.0, forbidden_y_max + 0.02)  # 2% 여유 공간으로 증가
             safe_height = 1.0 - safe_y
             if safe_height >= min_height:
                 candidate_regions.append({
                     "x": 0.0, "y": safe_y, "width": 1.0, "height": safe_height, "name": "bottom_full"
                 })
         
-        # 좌측 영역 (금지 영역 왼쪽) - 금지 영역과 겹치지 않도록 여유 공간 추가
-        if avoid_x_min > min_width:
-            safe_width = max(0.0, avoid_x_min - 0.01)  # 1% 여유 공간
+        # 좌측 영역 (금지 영역 왼쪽) - 금지 영역과 완전히 겹치지 않도록 충분한 여유 공간 추가
+        if forbidden_x_min > min_width:
+            safe_width = max(0.0, forbidden_x_min - 0.02)  # 2% 여유 공간으로 증가
             if safe_width >= min_width:
                 candidate_regions.append({
                     "x": 0.0, "y": 0.0, "width": safe_width, "height": 1.0, "name": "left_full"
                 })
         
-        # 우측 영역 (금지 영역 오른쪽) - 금지 영역과 겹치지 않도록 여유 공간 추가
-        right_available = 1.0 - avoid_x_max
+        # 우측 영역 (금지 영역 오른쪽) - 금지 영역과 완전히 겹치지 않도록 충분한 여유 공간 추가
+        right_available = 1.0 - forbidden_x_max
         if right_available > min_width:
-            safe_x = min(1.0, avoid_x_max + 0.01)  # 1% 여유 공간
+            safe_x = min(1.0, forbidden_x_max + 0.02)  # 2% 여유 공간으로 증가
             safe_width = 1.0 - safe_x
             if safe_width >= min_width:
                 candidate_regions.append({
@@ -864,12 +865,14 @@ def _find_max_size_proposal(
         if width < min_width or height < min_height:
             continue
         
-        # 금지 영역과의 IoU 확인
-        iou = _compute_forbidden_iou(x, y, width, height, avoid_regions, mask_array, w, h)
+        # 금지 영역과의 IoU 확인 및 실제 겹침 체크
+        iou = _compute_forbidden_iou(x, y, width, height, forbidden_regions, mask_array, w, h)
+        overlaps = _overlaps_with_forbidden(x, y, width, height, forbidden_regions, mask_array, w, h)
         
-        logger.info(f"[Planner] candidate region {name}: xywh=[{x:.3f}, {y:.3f}, {width:.3f}, {height:.3f}], IoU={iou:.4f}, max_forbidden_iou={max_forbidden_iou}")
+        logger.info(f"[Planner] candidate region {name}: xywh=[{x:.3f}, {y:.3f}, {width:.3f}, {height:.3f}], IoU={iou:.6f}, overlaps={overlaps}, max_forbidden_iou={max_forbidden_iou}")
         
-        if iou <= max_forbidden_iou:
+        # IoU가 허용 범위 내이고, 실제로 겹치지 않는 경우만 선택
+        if iou <= max_forbidden_iou and not overlaps:
             area = width * height
             if area > max_area:
                 max_area = area
@@ -884,25 +887,26 @@ def _find_max_size_proposal(
                     "occlusion_iou": iou,
                     "area": area
                 }
-                logger.info(f"[Planner] 새로운 best_proposal: {name} -> max_size_full, area={area:.4f}, IoU={iou:.4f}")
+                logger.info(f"[Planner] 새로운 best_proposal: {name} -> max_size_full, area={area:.4f}, IoU={iou:.6f}, overlaps={overlaps}")
         else:
-            logger.warning(f"[Planner] candidate region {name} rejected: IoU={iou:.4f} > max_forbidden_iou={max_forbidden_iou}")
+            logger.warning(f"[Planner] candidate region {name} rejected: IoU={iou:.6f} > max_forbidden_iou={max_forbidden_iou} or overlaps={overlaps}")
     
     # 추가: 더 세밀한 탐색 (금지 영역 주변의 최적 크기 찾기)
-    if avoid_regions:
+    if forbidden_regions:
         # 상단 영역에서 세밀하게 탐색
-        if avoid_y_min > min_height:
+        if forbidden_y_min > min_height:
             for width in [1.0, 0.95, 0.9, 0.85, 0.8]:
                 if width < min_width:
                     continue
-                for height in [avoid_y_min - 0.05, avoid_y_min - 0.02, avoid_y_min]:
+                for height in [forbidden_y_min - 0.05, forbidden_y_min - 0.02, forbidden_y_min]:
                     if height < min_height:
                         continue
                     x = (1.0 - width) / 2  # 중앙 정렬
                     y = 0.0
                     
-                    iou = _compute_forbidden_iou(x, y, width, height, avoid_regions, mask_array, w, h)
-                    if iou <= max_forbidden_iou:
+                    iou = _compute_forbidden_iou(x, y, width, height, forbidden_regions, mask_array, w, h)
+                    overlaps = _overlaps_with_forbidden(x, y, width, height, forbidden_regions, mask_array, w, h)
+                    if iou <= max_forbidden_iou and not overlaps:
                         area = width * height
                         if area > max_area:
                             max_area = area
@@ -918,7 +922,7 @@ def _find_max_size_proposal(
                             }
         
         # 하단 영역에서 세밀하게 탐색
-        bottom_height = 1.0 - avoid_y_max
+        bottom_height = 1.0 - forbidden_y_max
         if bottom_height > min_height:
             for width in [1.0, 0.95, 0.9, 0.85, 0.8]:
                 if width < min_width:
@@ -927,10 +931,11 @@ def _find_max_size_proposal(
                     if height < min_height:
                         continue
                     x = (1.0 - width) / 2  # 중앙 정렬
-                    y = avoid_y_max
+                    y = forbidden_y_max
                     
-                    iou = _compute_forbidden_iou(x, y, width, height, avoid_regions, mask_array, w, h)
-                    if iou <= max_forbidden_iou:
+                    iou = _compute_forbidden_iou(x, y, width, height, forbidden_regions, mask_array, w, h)
+                    overlaps = _overlaps_with_forbidden(x, y, width, height, forbidden_regions, mask_array, w, h)
+                    if iou <= max_forbidden_iou and not overlaps:
                         area = width * height
                         if area > max_area:
                             max_area = area
@@ -950,11 +955,11 @@ def _find_max_size_proposal(
 
 def _overlaps_with_forbidden(
     x: float, y: float, width: float, height: float,
-    avoid_regions: List[List[float]],
+    forbidden_regions: List[List[float]],
     mask_array: Optional[np.ndarray],
     img_w: int, img_h: int
 ) -> bool:
     """제안 영역이 금지 영역과 겹치는지 확인 (IoU > 0)"""
-    iou = _compute_forbidden_iou(x, y, width, height, avoid_regions, mask_array, img_w, img_h)
+    iou = _compute_forbidden_iou(x, y, width, height, forbidden_regions, mask_array, img_w, img_h)
     return iou > 0.0
 
