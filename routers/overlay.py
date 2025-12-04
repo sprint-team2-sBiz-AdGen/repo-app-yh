@@ -10,7 +10,7 @@
 # updated_at: 2025-12-04
 # author: LEEYH205
 # description: Overlay logic with DB integration
-# version: 2.3.0
+# version: 2.3.1
 # status: production
 # tags: overlay
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -211,13 +211,14 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                 proposal_id_uuid = None
                 x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
         else:
-            # proposal_id가 없으면 job_id로 최신 proposal 찾기
+            # proposal_id가 없으면 job_variant의 img_asset_id로 최신 proposal 찾기
             try:
-                job_input = db.query(JobInput).filter(JobInput.job_id == job_id).first()
-                if job_input and job_input.img_asset_id:
+                # job_variant의 img_asset_id 사용 (각 variant는 자신의 이미지에 대한 proposal을 사용해야 함)
+                variant_image_asset_id = job_variant.img_asset_id
+                if variant_image_asset_id:
                     # 같은 image_asset_id를 가진 최신 proposal 찾기
                     latest_proposal = db.query(PlannerProposal).filter(
-                        PlannerProposal.image_asset_id == job_input.img_asset_id
+                        PlannerProposal.image_asset_id == variant_image_asset_id
                     ).order_by(PlannerProposal.created_at.desc()).first()
                     
                     if latest_proposal and latest_proposal.layout:
@@ -238,21 +239,26 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                                     x_ratio, y_ratio, width_ratio, height_ratio = xywh
                                     x, y, pw, ph = (int(w * x_ratio), int(h * y_ratio), int(w * width_ratio), int(h * height_ratio))
                                     proposal_id_uuid = latest_proposal.proposal_id
-                                    print(f"[위치 선택] job_id로 최신 proposal 자동 선택: x={x}, y={y}, w={pw}, h={ph}, source={best_proposal.get('source', 'N/A')}")
-                                    logger.info(f"Auto-selected latest proposal from job_id: x={x}, y={y}, w={pw}, h={ph}, proposal_id={proposal_id_uuid}")
+                                    print(f"[위치 선택] job_variant의 img_asset_id로 최신 proposal 자동 선택: x={x}, y={y}, w={pw}, h={ph}, source={best_proposal.get('source', 'N/A')}, proposal_id={proposal_id_uuid}")
+                                    logger.info(f"Auto-selected latest proposal from variant img_asset_id: x={x}, y={y}, w={pw}, h={ph}, proposal_id={proposal_id_uuid}, variant_img_asset_id={variant_image_asset_id}")
                                 else:
+                                    logger.warning(f"Best proposal has no xywh, using default layout")
                                     x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                                     x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
                             else:
+                                logger.warning(f"Proposal layout has no proposals, using default layout")
                                 x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                                 x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
                         else:
+                            logger.warning(f"Proposal layout is invalid, using default layout")
                             x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                             x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
                     else:
+                        logger.warning(f"No proposal found for variant img_asset_id={variant_image_asset_id}, using default layout")
                         x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                         x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
                 else:
+                    logger.warning(f"Variant has no img_asset_id, using default layout")
                     x, y, pw, ph = (int(w * 0.1), int(h * 0.05), int(w * 0.8), int(h * 0.18))
                     x_ratio, y_ratio, width_ratio, height_ratio = 0.1, 0.05, 0.8, 0.18
             except Exception as e:
