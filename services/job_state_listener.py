@@ -3,10 +3,10 @@ PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
 """
 ########################################################
 # created_at: 2025-11-28
-# updated_at: 2025-12-01
+# updated_at: 2025-12-04
 # author: LEEYH205
 # description: PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너
-# version: 2.3.1
+# version: 2.3.2
 # changes: iou_eval 단계 수동 복구 로직 추가 (주기적 체크)
 # status: development
 # tags: database, listener, notify
@@ -26,7 +26,7 @@ from config import DATABASE_URL, JOB_STATE_LISTENER_RECONNECT_DELAY
 logger = logging.getLogger(__name__)
 
 # 최대 재시도 횟수 (Job 단위)
-MAX_JOB_RETRY_COUNT = 3
+MAX_JOB_RETRY_COUNT = 20
 
 class JobStateListener:
     """PostgreSQL LISTEN/NOTIFY를 사용한 Job 상태 변화 리스너"""

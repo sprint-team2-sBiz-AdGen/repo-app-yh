@@ -7,10 +7,10 @@
 # - job 상태 업데이트
 ########################################################
 # created_at: 2025-11-20
-# updated_at: 2025-12-03
+# updated_at: 2025-12-04
 # author: LEEYH205
 # description: Overlay logic with DB integration
-# version: 2.2.3
+# version: 2.3.0
 # status: production
 # tags: overlay
 # dependencies: fastapi, pydantic, PIL, sqlalchemy
@@ -485,7 +485,6 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         final_font_name = font_name  # LLaVA 추천 또는 사용자 지정 폰트 이름
         if not final_font_name and final_font_path:
             # 경로에서 폰트 이름 추출 시도 (예: /path/to/GmarketSans.ttf -> Gmarket Sans)
-            import os
             font_filename = os.path.basename(final_font_path)
             # 파일명에서 확장자 제거하고 폰트 이름으로 사용
             final_font_name = os.path.splitext(font_filename)[0]
@@ -575,7 +574,14 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         except Exception as e:
             logger.warning(f"절대 경로 변환 실패: {e}")
             result_path = "N/A"
-        result_filename = os.path.basename(result_path) if result_path != "N/A" else os.path.basename(result_url) if result_url != "N/A" else "N/A"
+        
+        # result_filename 계산 (os 모듈 사용)
+        if result_path != "N/A":
+            result_filename = os.path.basename(result_path)
+        elif result_url != "N/A":
+            result_filename = os.path.basename(result_url)
+        else:
+            result_filename = "N/A"
         print(f"\n{'='*60}")
         print(f"[최종 결과물 저장 완료]")
         print(f"  - Asset ID: {meta.get('asset_id', 'N/A')}")
@@ -1119,9 +1125,20 @@ def _select_best_proposal_with_diversity(
         else:
             return "other"
     
-    # 위치 그룹별로 proposal 분류
+    # 위치 그룹별로 proposal 분류 (occlusion_iou 필터링 추가)
+    # max_forbidden_iou 기본값: 0.05 (planner에서 사용하는 값과 동일)
+    MAX_FORBIDDEN_IOU = 0.05
+    
     position_groups = {}
     for prop in proposals_list:
+        # occlusion_iou가 허용 범위를 초과하는 proposal은 제외
+        occlusion_iou = prop.get("occlusion_iou", 0.0)
+        if occlusion_iou > MAX_FORBIDDEN_IOU:
+            source = prop.get("source", "unknown")
+            print(f"[위치 선택 함수] proposal 제외 (occlusion_iou={occlusion_iou:.6f} > {MAX_FORBIDDEN_IOU}): source={source}, xywh={prop.get('xywh', 'N/A')}")
+            logger.warning(f"[위치 선택 함수] proposal 제외 (occlusion_iou={occlusion_iou:.6f} > {MAX_FORBIDDEN_IOU}): source={source}, xywh={prop.get('xywh', 'N/A')}")
+            continue
+        
         source = prop.get("source", "")
         group = _get_position_group(source)
         if group not in position_groups:
@@ -1194,11 +1211,25 @@ def _select_best_proposal_with_diversity(
         return proposals_list[0]
     
     # 매우 긴 텍스트(100자 이상)이고 max_size proposal이 있으면 강제 선택
+    # 단, occlusion_iou가 허용 범위 내인 경우만
     if ad_text and len(ad_text) >= 100 and "max_size" in group_best:
         max_size_prop = group_best["max_size"]
-        print(f"[위치 선택 함수] 매우 긴 텍스트({len(ad_text)}자) 감지 → max_size proposal 강제 선택")
-        logger.info(f"[위치 선택 함수] 매우 긴 텍스트({len(ad_text)}자) 감지 → max_size proposal 강제 선택")
-        return max_size_prop
+        occlusion_iou = max_size_prop.get("occlusion_iou", 0.0)
+        if occlusion_iou <= MAX_FORBIDDEN_IOU:
+            print(f"[위치 선택 함수] 매우 긴 텍스트({len(ad_text)}자) 감지 → max_size proposal 강제 선택 (occlusion_iou={occlusion_iou:.6f})")
+            logger.info(f"[위치 선택 함수] 매우 긴 텍스트({len(ad_text)}자) 감지 → max_size proposal 강제 선택 (occlusion_iou={occlusion_iou:.6f})")
+            return max_size_prop
+        else:
+            print(f"[위치 선택 함수] 매우 긴 텍스트({len(ad_text)}자)이지만 max_size proposal의 occlusion_iou({occlusion_iou:.6f})가 허용 범위({MAX_FORBIDDEN_IOU})를 초과하여 제외")
+            logger.warning(f"[위치 선택 함수] 매우 긴 텍스트({len(ad_text)}자)이지만 max_size proposal의 occlusion_iou({occlusion_iou:.6f})가 허용 범위({MAX_FORBIDDEN_IOU})를 초과하여 제외")
+            # max_size 그룹 제거
+            if "max_size" in group_best:
+                del group_best["max_size"]
+            if "max_size" in group_scores:
+                del group_scores["max_size"]
+            # groups와 scores 재계산
+            groups = list(group_best.keys())
+            scores = [group_scores[g] for g in groups] if groups else []
     
     groups = list(group_best.keys())
     scores = [group_scores[g] for g in groups]
@@ -1249,8 +1280,26 @@ def _select_best_proposal_with_diversity(
     selected_group = np.random.choice(groups, p=probabilities)
     selected = group_best[selected_group]
     
-    logger.info(f"[위치 선택] Softmax 샘플링으로 그룹 '{selected_group}' 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}, 확률={probabilities[groups.index(selected_group)]:.3f}")
-    print(f"[위치 선택] Softmax 샘플링으로 그룹 '{selected_group}' 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}, 확률={probabilities[groups.index(selected_group)]:.3f}")
+    # 최종 선택된 proposal의 occlusion_iou 확인 (이중 체크)
+    final_occlusion_iou = selected.get("occlusion_iou", 0.0)
+    if final_occlusion_iou > MAX_FORBIDDEN_IOU:
+        print(f"[위치 선택 함수] ⚠️ 선택된 proposal의 occlusion_iou({final_occlusion_iou:.6f})가 허용 범위({MAX_FORBIDDEN_IOU})를 초과합니다. 다른 proposal 선택 시도...")
+        logger.warning(f"[위치 선택 함수] ⚠️ 선택된 proposal의 occlusion_iou({final_occlusion_iou:.6f})가 허용 범위({MAX_FORBIDDEN_IOU})를 초과합니다. 다른 proposal 선택 시도...")
+        
+        # occlusion_iou가 허용 범위 내인 다른 proposal 찾기
+        valid_proposals = [p for p in proposals_list if p.get("occlusion_iou", 0.0) <= MAX_FORBIDDEN_IOU]
+        if valid_proposals:
+            # 점수 순으로 정렬하여 최고 점수 proposal 선택
+            valid_proposals.sort(key=lambda p: p.get("score", 0.0), reverse=True)
+            selected = valid_proposals[0]
+            print(f"[위치 선택 함수] ✅ occlusion_iou가 허용 범위 내인 proposal로 변경: source={selected.get('source')}, occlusion_iou={selected.get('occlusion_iou', 0.0):.6f}")
+            logger.info(f"[위치 선택 함수] ✅ occlusion_iou가 허용 범위 내인 proposal로 변경: source={selected.get('source')}, occlusion_iou={selected.get('occlusion_iou', 0.0):.6f}")
+        else:
+            print(f"[위치 선택 함수] ⚠️ occlusion_iou가 허용 범위 내인 proposal이 없습니다. 원래 선택된 proposal 사용 (occlusion_iou={final_occlusion_iou:.6f})")
+            logger.warning(f"[위치 선택 함수] ⚠️ occlusion_iou가 허용 범위 내인 proposal이 없습니다. 원래 선택된 proposal 사용 (occlusion_iou={final_occlusion_iou:.6f})")
+    
+    logger.info(f"[위치 선택] Softmax 샘플링으로 그룹 '{selected_group}' 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}, occlusion_iou={selected.get('occlusion_iou', 0.0):.6f}, 확률={probabilities[groups.index(selected_group)]:.3f}")
+    print(f"[위치 선택] Softmax 샘플링으로 그룹 '{selected_group}' 선택: source={selected.get('source')}, score={selected.get('score')}, xywh={selected.get('xywh')}, occlusion_iou={selected.get('occlusion_iou', 0.0):.6f}, 확률={probabilities[groups.index(selected_group)]:.3f}")
     
     return selected
 

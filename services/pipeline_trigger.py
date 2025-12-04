@@ -3,10 +3,10 @@ Job 상태 변화에 따라 다음 파이프라인 단계를 자동으로 트리
 """
 ########################################################
 # created_at: 2025-11-28
-# updated_at: 2025-12-03
+# updated_at: 2025-12-04
 # author: LEEYH205
 # description: Job 상태 변화에 따라 다음 파이프라인 단계를 자동으로 트리거
-# version: 2.2.1
+# version: 2.3.0
 # status: development
 # tags: pipeline, trigger, automation
 # dependencies: httpx, asyncpg
@@ -299,19 +299,36 @@ async def retry_pipeline_stage(
                 variant_id = str(variant['job_variants_id'])
                 img_asset_id = str(variant['img_asset_id']) if variant['img_asset_id'] else ''
                 
-                # variant를 queued 상태로 변경하여 현재 단계 재실행
-                await conn.execute(
-                    """
-                    UPDATE jobs_variants
-                    SET status = 'queued',
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE job_variants_id = $1
-                      AND current_step = $2
-                      AND status = 'failed'
-                    """,
-                    uuid.UUID(variant_id),
-                    current_step
-                )
+                # overlay 단계 재시도의 경우, current_step을 'planner'로 되돌리고 status를 'done'으로 설정
+                # (overlay API는 current_step='planner', status='done'이어야 함)
+                if current_step == 'overlay':
+                    await conn.execute(
+                        """
+                        UPDATE jobs_variants
+                        SET status = 'done',
+                            current_step = 'planner',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = $1
+                          AND current_step = $2
+                          AND status = 'failed'
+                        """,
+                        uuid.UUID(variant_id),
+                        current_step
+                    )
+                else:
+                    # 다른 단계는 queued 상태로 변경
+                    await conn.execute(
+                        """
+                        UPDATE jobs_variants
+                        SET status = 'queued',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = $1
+                          AND current_step = $2
+                          AND status = 'failed'
+                        """,
+                        uuid.UUID(variant_id),
+                        current_step
+                    )
                 
                 # API 호출 준비
                 request_data = {
@@ -335,6 +352,8 @@ async def retry_pipeline_stage(
                     text_and_proposal = await _get_text_and_proposal_from_job_variant(variant_id, job_id, tenant_id)
                     if text_and_proposal:
                         request_data['text'] = text_and_proposal['text']
+                        request_data['x_align'] = 'center'
+                        request_data['y_align'] = 'top'
                         if text_and_proposal.get('proposal_id'):
                             request_data['proposal_id'] = text_and_proposal['proposal_id']
                     else:
@@ -505,20 +524,76 @@ async def trigger_next_pipeline_stage_for_variant(
         return
     
     # 다음 단계 정보 조회
-    # queued 상태일 때는 현재 단계를 실행해야 하므로, (current_step, 'done') 매핑을 사용
-    # (queued → running → done 흐름에서 done 상태의 매핑을 재사용)
+    # queued 상태일 때는 현재 단계를 실행해야 하므로, 현재 단계의 API를 직접 호출
     if status == 'queued':
-        # queued 상태는 현재 단계를 실행하는 상태이므로, done 상태의 매핑을 사용
-        stage_info = PIPELINE_STAGES.get((current_step, 'done'))
+        # queued 상태는 현재 단계를 실행하는 상태이므로, 현재 단계의 API 엔드포인트를 찾아야 함
+        # 예: vlm_analyze, queued → /api/yh/llava/stage1/validate 호출
+        # 이전 단계의 'done' 매핑에서 현재 단계의 API 정보를 찾음
+        stage_info = None
+        
+        # 각 단계별 API 엔드포인트 매핑 (queued 상태에서 실행할 API)
+        QUEUED_STAGE_APIS = {
+            'vlm_analyze': {
+                'api_endpoint': '/api/yh/llava/stage1/validate',
+                'method': 'POST',
+                'needs_overlay_id': False,
+                'next_step': 'vlm_analyze'  # 현재 단계 실행 후 다음 단계는 yolo_detect이지만, 여기서는 현재 단계 실행
+            },
+            'yolo_detect': {
+                'api_endpoint': '/api/yh/yolo/detect',
+                'method': 'POST',
+                'needs_overlay_id': False,
+                'next_step': 'yolo_detect'
+            },
+            'planner': {
+                'api_endpoint': '/api/yh/planner',
+                'method': 'POST',
+                'needs_overlay_id': False,
+                'next_step': 'planner'
+            },
+            'overlay': {
+                'api_endpoint': '/api/yh/overlay',
+                'method': 'POST',
+                'needs_overlay_id': False,
+                'needs_text_and_proposal': True,
+                'next_step': 'overlay'
+            },
+            'vlm_judge': {
+                'api_endpoint': '/api/yh/llava/stage2/judge',
+                'method': 'POST',
+                'needs_overlay_id': True,
+                'next_step': 'vlm_judge'
+            },
+            'ocr_eval': {
+                'api_endpoint': '/api/yh/ocr/evaluate',
+                'method': 'POST',
+                'needs_overlay_id': True,
+                'next_step': 'ocr_eval'
+            },
+            'readability_eval': {
+                'api_endpoint': '/api/yh/readability/evaluate',
+                'method': 'POST',
+                'needs_overlay_id': True,
+                'next_step': 'readability_eval'
+            },
+            'iou_eval': {
+                'api_endpoint': '/api/yh/iou/evaluate',
+                'method': 'POST',
+                'needs_overlay_id': True,
+                'next_step': 'iou_eval'
+            }
+        }
+        
+        stage_info = QUEUED_STAGE_APIS.get(current_step)
         if not stage_info:
-            logger.debug(
-                f"다음 단계 없음 (queued 상태): job_variants_id={job_variants_id}, "
+            logger.warning(
+                f"queued 상태에서 현재 단계 API를 찾을 수 없음: job_variants_id={job_variants_id}, "
                 f"current_step={current_step}"
             )
             return
         logger.info(
             f"queued 상태에서 현재 단계 실행: job_variants_id={job_variants_id}, "
-            f"current_step={current_step}, next_step={stage_info['next_step']}"
+            f"current_step={current_step}, api_endpoint={stage_info['api_endpoint']}"
         )
     else:
         # done 상태일 때는 일반적인 다음 단계 매핑 사용
