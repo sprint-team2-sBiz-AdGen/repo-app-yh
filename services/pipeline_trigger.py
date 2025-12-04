@@ -204,6 +204,8 @@ async def retry_pipeline_stage(
     
     PIPELINE_STAGES에서 next_step이 current_step인 항목을 찾아
     해당 단계의 API를 다시 호출한다.
+    
+    Variant 레벨 단계인 경우, 모든 failed variants를 재시도합니다.
     """
     if not current_step:
         logger.debug(f"[RETRY] current_step 누락으로 재시도 스킵: job_id={job_id}")
@@ -222,43 +224,170 @@ async def retry_pipeline_stage(
         )
         return
     
-    api_url = f"http://{HOST}:{PORT}{stage_info['api_endpoint']}"
-    request_data = {
-        "job_id": job_id,
-        "tenant_id": tenant_id,
-    }
-    
-    # overlay_id 등이 필요한 단계는 재시도 대상에서 제외 (vlm_analyze, yolo_detect 중심)
-    if stage_info.get("needs_overlay_id") or stage_info.get("needs_text_and_proposal"):
-        logger.warning(
-            f"[RETRY] overlay_id/text가 필요한 단계는 재시도 스킵: "
-            f"job_id={job_id}, current_step={current_step}, api={api_url}"
+    # Job 레벨 단계인 경우 기존 로직 사용
+    if stage_info.get('is_job_level', False):
+        api_url = f"http://{HOST}:{PORT}{stage_info['api_endpoint']}"
+        request_data = {
+            "job_id": job_id,
+            "tenant_id": tenant_id,
+        }
+        
+        logger.info(
+            f"[RETRY] 파이프라인 단계 재시도 (Job 레벨): job_id={job_id}, "
+            f"current_step={current_step}, api={api_url}"
         )
+        
+        try:
+            async with httpx.AsyncClient(timeout=1800.0) as client:  # 30분 타임아웃
+                response = await client.post(api_url, json=request_data)
+                response.raise_for_status()
+                logger.info(
+                    f"[RETRY] 파이프라인 단계 재실행 성공 (Job 레벨): job_id={job_id}, "
+                    f"current_step={current_step}"
+                )
+        except httpx.HTTPError as e:
+            logger.error(
+                f"[RETRY] 파이프라인 단계 재실행 실패 (Job 레벨): job_id={job_id}, "
+                f"current_step={current_step}, error={e}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[RETRY] 파이프라인 단계 재실행 중 예상치 못한 오류 (Job 레벨): job_id={job_id}, "
+                f"current_step={current_step}, error={e}",
+                exc_info=True,
+            )
         return
     
-    logger.info(
-        f"[RETRY] 파이프라인 단계 재시도: job_id={job_id}, "
-        f"current_step={current_step}, api={api_url}"
-    )
+    # Variant 레벨 단계인 경우: 모든 failed variants 재시도
+    import asyncpg
+    from config import DATABASE_URL
+    
+    asyncpg_url = DATABASE_URL.replace("postgresql://", "postgres://")
     
     try:
-        async with httpx.AsyncClient(timeout=1800.0) as client:  # 30분 타임아웃
-            response = await client.post(api_url, json=request_data)
-            response.raise_for_status()
-            logger.info(
-                f"[RETRY] 파이프라인 단계 재실행 성공: job_id={job_id}, "
-                f"current_step={current_step}"
+        conn = await asyncpg.connect(asyncpg_url)
+        try:
+            # 해당 단계에서 failed인 모든 variants 조회
+            failed_variants = await conn.fetch(
+                """
+                SELECT job_variants_id, img_asset_id
+                FROM jobs_variants
+                WHERE job_id = $1
+                  AND current_step = $2
+                  AND status = 'failed'
+                ORDER BY creation_order
+                """,
+                uuid.UUID(job_id),
+                current_step
             )
-    except httpx.HTTPError as e:
-        logger.error(
-            f"[RETRY] 파이프라인 단계 재실행 실패: job_id={job_id}, "
-            f"current_step={current_step}, error={e}"
-        )
+            
+            if not failed_variants:
+                logger.debug(
+                    f"[RETRY] 재시도할 failed variants 없음: job_id={job_id}, current_step={current_step}"
+                )
+                return
+            
+            logger.info(
+                f"[RETRY] 파이프라인 단계 재시도 (Variant 레벨): job_id={job_id}, "
+                f"current_step={current_step}, failed_variants={len(failed_variants)}개"
+            )
+            
+            # 각 variant 재시도
+            api_url = f"http://{HOST}:{PORT}{stage_info['api_endpoint']}"
+            
+            for variant in failed_variants:
+                variant_id = str(variant['job_variants_id'])
+                img_asset_id = str(variant['img_asset_id']) if variant['img_asset_id'] else ''
+                
+                # variant를 queued 상태로 변경하여 현재 단계 재실행
+                await conn.execute(
+                    """
+                    UPDATE jobs_variants
+                    SET status = 'queued',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_variants_id = $1
+                      AND current_step = $2
+                      AND status = 'failed'
+                    """,
+                    uuid.UUID(variant_id),
+                    current_step
+                )
+                
+                # API 호출 준비
+                request_data = {
+                    'job_variants_id': variant_id,
+                    'job_id': job_id,
+                    'tenant_id': tenant_id
+                }
+                
+                # overlay_id가 필요한 경우 조회
+                if stage_info.get('needs_overlay_id', False):
+                    overlay_id = await _get_overlay_id_from_job_variant(variant_id, job_id, tenant_id)
+                    if overlay_id:
+                        request_data['overlay_id'] = overlay_id
+                        logger.info(f"[RETRY] overlay_id 조회 성공: variant_id={variant_id}, overlay_id={overlay_id}")
+                    else:
+                        logger.warning(f"[RETRY] overlay_id를 찾을 수 없어 재시도 스킵: variant_id={variant_id}")
+                        continue
+                
+                # text와 proposal_id가 필요한 경우 조회
+                if stage_info.get('needs_text_and_proposal', False):
+                    text_and_proposal = await _get_text_and_proposal_from_job_variant(variant_id, job_id, tenant_id)
+                    if text_and_proposal:
+                        request_data['text'] = text_and_proposal['text']
+                        if text_and_proposal.get('proposal_id'):
+                            request_data['proposal_id'] = text_and_proposal['proposal_id']
+                    else:
+                        logger.warning(f"[RETRY] text를 찾을 수 없어 재시도 스킵: variant_id={variant_id}")
+                        continue
+                
+                # API 호출
+                try:
+                    async with httpx.AsyncClient(timeout=1800.0) as client:  # 30분 타임아웃
+                        response = await client.post(api_url, json=request_data)
+                        response.raise_for_status()
+                        logger.info(
+                            f"[RETRY] Variant 재시도 성공: job_variants_id={variant_id}, "
+                            f"current_step={current_step}"
+                        )
+                except httpx.HTTPError as e:
+                    logger.error(
+                        f"[RETRY] Variant 재시도 실패: job_variants_id={variant_id}, "
+                        f"current_step={current_step}, error={e}"
+                    )
+                    # 실패 시 다시 failed로 변경
+                    await conn.execute(
+                        """
+                        UPDATE jobs_variants
+                        SET status = 'failed',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = $1
+                        """,
+                        uuid.UUID(variant_id)
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"[RETRY] Variant 재시도 중 예상치 못한 오류: job_variants_id={variant_id}, "
+                        f"current_step={current_step}, error={e}",
+                        exc_info=True
+                    )
+                    # 실패 시 다시 failed로 변경
+                    await conn.execute(
+                        """
+                        UPDATE jobs_variants
+                        SET status = 'failed',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_variants_id = $1
+                        """,
+                        uuid.UUID(variant_id)
+                    )
+        finally:
+            await conn.close()
     except Exception as e:
         logger.error(
-            f"[RETRY] 파이프라인 단계 재실행 중 예상치 못한 오류: job_id={job_id}, "
+            f"[RETRY] 파이프라인 단계 재시도 중 오류 (Variant 레벨): job_id={job_id}, "
             f"current_step={current_step}, error={e}",
-            exc_info=True,
+            exc_info=True
         )
 
 async def _verify_job_state(
