@@ -15,7 +15,6 @@ build/
 *.log
 
 model/
-docs/
 
 # Python package marker files
 __init__.py
