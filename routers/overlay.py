@@ -479,9 +479,19 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
         font, wrapped_text = _fit_text(
             draw, body.text, padded_bbox, font_paths, min_font_size, max_font_size
         )
-        final_font_size = font.size if hasattr(font, 'size') else 'N/A'
-        print(f"[폰트 적용] ✓ 텍스트 피팅 완료: 최종 폰트 크기={final_font_size}px, 경로={getattr(font, 'path', '기본 폰트')}, 줄 수={len(wrapped_text.split(chr(10))) if wrapped_text else 0}")
-        logger.info(f"[폰트 적용] ✓ 텍스트 피팅 완료: font_size={final_font_size}, font_path={getattr(font, 'path', 'N/A')}, wrapped_lines={len(wrapped_text.split(chr(10))) if wrapped_text else 0}")
+        final_font_size = font.size if hasattr(font, 'size') else None
+        final_font_path = getattr(font, 'path', None)
+        # 실제 사용된 폰트 이름 추출 (경로에서 폰트 이름 추출 또는 원본 font_name 사용)
+        final_font_name = font_name  # LLaVA 추천 또는 사용자 지정 폰트 이름
+        if not final_font_name and final_font_path:
+            # 경로에서 폰트 이름 추출 시도 (예: /path/to/GmarketSans.ttf -> Gmarket Sans)
+            import os
+            font_filename = os.path.basename(final_font_path)
+            # 파일명에서 확장자 제거하고 폰트 이름으로 사용
+            final_font_name = os.path.splitext(font_filename)[0]
+        
+        print(f"[폰트 적용] ✓ 텍스트 피팅 완료: 최종 폰트 크기={final_font_size}px, 경로={final_font_path or '기본 폰트'}, 줄 수={len(wrapped_text.split(chr(10))) if wrapped_text else 0}")
+        logger.info(f"[폰트 적용] ✓ 텍스트 피팅 완료: font_size={final_font_size}, font_path={final_font_path or 'N/A'}, font_name={final_font_name or 'N/A'}, wrapped_lines={len(wrapped_text.split(chr(10))) if wrapped_text else 0}")
         
         # 텍스트 색상 (우선순위: 요청 파라미터 > LLaVA 추천 > 기본값)
         text_color_hex = body.text_color
@@ -589,6 +599,9 @@ def overlay(body: OverlayIn, db: Session = Depends(get_db)):
                 "x_align": body.x_align,
                 "y_align": body.y_align,
                 "text_size": body.text_size,
+                "font_name": final_font_name,  # 실제 사용된 폰트 이름
+                "font_size": final_font_size,  # 실제 사용된 폰트 크기
+                "font_path": final_font_path,  # 실제 사용된 폰트 경로
                 "overlay_color": body.overlay_color,
                 "text_color": body.text_color,
                 "margin": body.margin,

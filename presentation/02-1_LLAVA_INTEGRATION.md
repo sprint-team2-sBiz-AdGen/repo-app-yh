@@ -258,6 +258,116 @@ print(f'고유 모델 인스턴스: {unique_model_ids}개 (예상: 1개)')
 # ❌ 실패: 3개 → Thread-safe 로딩 실패
 ```
 
+---
+
+### 예상 질문 및 답변
+
+#### Q1: GPU 성능이 좋다면 thread별로 모델을 업로드해서 쓸 수도 있는거야?
+
+**답변**: 기술적으로는 가능하지만, 현재는 **싱글톤 패턴(단일 모델 인스턴스 공유)**을 사용하는 것이 더 효율적입니다.
+
+**1. 기술적 가능성**
+
+```python
+# Thread별 모델 로딩 예시 (현재는 사용하지 않음)
+_thread_models = {}  # thread_id -> (processor, model)
+_thread_lock = threading.Lock()
+
+def get_llava_model_per_thread():
+    thread_id = threading.get_ident()
+    
+    if thread_id not in _thread_models:
+        with _thread_lock:
+            if thread_id not in _thread_models:
+                # 각 스레드마다 별도 모델 인스턴스 로드
+                processor = LlavaProcessor.from_pretrained(...)
+                model = LlavaForConditionalGeneration.from_pretrained(...)
+                _thread_models[thread_id] = (processor, model)
+    
+    return _thread_models[thread_id]
+```
+
+**2. 현재 싱글톤 패턴을 사용하는 이유**
+
+| 항목 | 싱글톤 패턴 (현재) | Thread별 모델 |
+|------|-------------------|---------------|
+| **메모리 사용량** | ~7GB (8-bit 양자화) | ~7GB × 스레드 수 |
+| **로딩 시간** | 1회만 로드 (1-2분) | 스레드마다 로드 (1-2분 × N) |
+| **동시성** | 모델 공유로 인한 잠금 필요 | 잠금 없이 병렬 처리 가능 |
+| **GPU 메모리** | 효율적 (1개 모델) | 비효율적 (N개 모델) |
+
+**3. Thread별 모델이 유리한 경우**
+
+다음 조건을 모두 만족할 때만 고려할 수 있습니다:
+
+- ✅ **GPU 메모리가 충분한 경우** (예: 80GB 이상)
+  - LLaVA 7B 모델: FP16 기준 ~14GB, 8-bit 양자화 기준 ~7GB
+  - 10개 스레드 × 7GB = 70GB 필요
+- ✅ **동시 요청이 매우 많은 경우** (예: 초당 100+ 요청)
+  - 모델 공유 시 잠금 경합으로 인한 성능 저하가 심각할 때
+- ✅ **로딩 시간이 문제가 아닌 경우**
+  - 워밍업 시간이 충분하거나, 서버 시작 시 미리 로드 가능할 때
+
+**4. 현재 시스템에서 싱글톤 패턴이 더 나은 이유**
+
+1. **메모리 효율성**
+   ```
+   싱글톤: 7GB (1개 모델)
+   Thread별: 70GB (10개 스레드 × 7GB)
+   → 메모리 사용량 10배 차이
+   ```
+
+2. **PyTorch의 내부 최적화**
+   - PyTorch는 모델 추론 시 내부적으로 동시성 처리 최적화
+   - 단일 모델 인스턴스도 여러 요청을 효율적으로 처리 가능
+   - `model.eval()` 모드에서는 thread-safe하게 추론 가능
+
+3. **실제 성능 차이**
+   ```
+   싱글톤 패턴:
+   - 요청 처리: ~5-10초/이미지
+   - 동시 처리: 순차 처리 (잠금으로 인한 대기)
+   
+   Thread별 모델:
+   - 요청 처리: ~5-10초/이미지 (동일)
+   - 동시 처리: 병렬 처리 가능
+   - 하지만 GPU 메모리 부족으로 OOM 발생 가능
+   ```
+
+4. **현재 시스템 특성**
+   - **요청 빈도**: 초당 수십 개 수준 (초당 100+ 수준 아님)
+   - **GPU 메모리**: 23GB (L4 GPU)
+   - **모델 크기**: 7GB (8-bit 양자화)
+   - → 싱글톤 패턴으로도 충분히 처리 가능
+
+**5. 결론**
+
+- **현재 시스템**: 싱글톤 패턴이 최적
+  - 메모리 효율적
+  - 충분한 성능 제공
+  - 구현이 간단하고 안정적
+
+- **Thread별 모델 고려 시점**:
+  - GPU 메모리가 80GB 이상일 때
+  - 초당 100+ 요청이 지속적으로 들어올 때
+  - 메모리 비용보다 처리량이 더 중요할 때
+
+**6. 대안: 비동기 처리**
+
+Thread별 모델 대신, 비동기 처리로 동시성을 높이는 방법도 있습니다:
+
+```python
+# FastAPI의 비동기 처리 활용
+@router.post("/api/yh/llava/stage1/validate")
+async def llava_stage1_validate(body: LLaVaStage1In):
+    # 비동기로 처리하여 동시 요청 처리 능력 향상
+    processor, model = get_llava_model()  # 싱글톤 모델 사용
+    result = await process_async(processor, model, body.image)
+    return result
+```
+
+이 방법으로 메모리는 절약하면서도 동시 처리 능력을 향상시킬 수 있습니다.
+
 **로그 확인**:
 
 ```bash
