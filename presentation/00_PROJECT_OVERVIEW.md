@@ -470,7 +470,9 @@ GPT API 호출 (한글 피드 + 해시태그)
    - 성능 분석
 
 7. **테스트 및 개발 도구**
-   - Background Job Creator
+   - Job Pipeline 모니터링 (`monitor_job_pipeline.py`)
+   - 파이프라인 결과 분석 (`analyze_pipeline_results.py`)
+   - Background Job Creator (`background_pipeline_with_text_generation.py`)
    - 리스너 상태 확인 도구
 
 ---
@@ -543,14 +545,15 @@ GPT API 호출 (한글 피드 + 해시태그)
 
 **코드베이스**:
 - Python 파일: 30+ 파일
-- 서비스 레이어: 8개 서비스
+- 서비스 레이어: 10개 서비스 (job_state_listener, pipeline_trigger, llava_service, yolo_service, planner_service, gpt_service, ocr_service, readability_service, iou_eval_service)
 - API 엔드포인트: 15+ 엔드포인트
 - 데이터베이스 테이블: 20+ 테이블
+- 모니터링 스크립트: monitor_job_pipeline.py, analyze_pipeline_results.py
 
 **파이프라인**:
 - 총 단계: 10단계
-- Variant별 단계: 8단계
-- Job 레벨 단계: 2단계
+- Variant별 단계: 8단계 (vlm_analyze → yolo_detect → planner → overlay → vlm_judge → ocr_eval → readability_eval → iou_eval)
+- Job 레벨 단계: 2단계 (ad_copy_gen_kor → instagram_feed_gen)
 
 **AI 모델**:
 - LLaVA: 7B 파라미터
@@ -642,5 +645,6 @@ GPT API 호출 (한글 피드 + 해시태그)
 **작성일**: 2025-12-02  
 **작성자**: LEEYH205  
 **버전**: 1.0.0
+
 
 

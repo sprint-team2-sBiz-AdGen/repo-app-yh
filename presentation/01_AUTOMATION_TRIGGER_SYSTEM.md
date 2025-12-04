@@ -124,16 +124,18 @@ JobStateListener가 이벤트 수신
 
 ### 1. PostgreSQL 트리거 함수
 
-**파일**: `db/init/03_job_variants_state_notify_trigger.sql`
+**파일**: `/home/leeyoungho/feedlyai/db/init/03_job_variants_state_notify_trigger.sql`
 
 ```sql
 -- 트리거 함수: jobs_variants 테이블 변경 시 NOTIFY 발행
 CREATE OR REPLACE FUNCTION notify_job_variant_state_change()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- current_step 또는 status가 변경된 경우에만 NOTIFY 발행
-    IF (OLD.current_step IS DISTINCT FROM NEW.current_step 
-        OR OLD.status IS DISTINCT FROM NEW.status) THEN
+    -- current_step, status, 또는 updated_at이 변경된 경우 NOTIFY 발행
+    -- updated_at 변경도 감지하여 INSERT 후 UPDATE 시 트리거 발동
+    IF (OLD.current_step IS DISTINCT FROM NEW.current_step
+        OR OLD.status IS DISTINCT FROM NEW.status
+        OR OLD.updated_at IS DISTINCT FROM NEW.updated_at) THEN
         
         PERFORM pg_notify(
             'job_variant_state_changed',
@@ -162,6 +164,7 @@ CREATE TRIGGER job_variant_state_change_trigger
 
 **핵심 포인트**:
 - `IS DISTINCT FROM`: NULL 값도 올바르게 처리
+- `updated_at` 감지: INSERT 후 UPDATE 시 트리거 발동을 위해 `updated_at` 변경도 감지
 - `pg_notify()`: 비동기 이벤트 발행
 - JSON 형식: 구조화된 데이터 전달
 
@@ -257,7 +260,43 @@ PIPELINE_STAGES = {
         'method': 'POST',
         'needs_overlay_id': False
     },
-    # ... (8개 더)
+    ('yolo_detect', 'done'): {
+        'next_step': 'planner',
+        'api_endpoint': '/api/yh/planner',
+        'method': 'POST',
+        'needs_overlay_id': False
+    },
+    ('planner', 'done'): {
+        'next_step': 'overlay',
+        'api_endpoint': '/api/yh/overlay',
+        'method': 'POST',
+        'needs_overlay_id': False,
+        'needs_text_and_proposal': True  # overlay는 text와 proposal_id가 필요
+    },
+    ('overlay', 'done'): {
+        'next_step': 'vlm_judge',
+        'api_endpoint': '/api/yh/llava/stage2/judge',
+        'method': 'POST',
+        'needs_overlay_id': True
+    },
+    ('vlm_judge', 'done'): {
+        'next_step': 'ocr_eval',
+        'api_endpoint': '/api/yh/ocr/evaluate',
+        'method': 'POST',
+        'needs_overlay_id': True
+    },
+    ('ocr_eval', 'done'): {
+        'next_step': 'readability_eval',
+        'api_endpoint': '/api/yh/readability/evaluate',
+        'method': 'POST',
+        'needs_overlay_id': True
+    },
+    ('readability_eval', 'done'): {
+        'next_step': 'iou_eval',
+        'api_endpoint': '/api/yh/iou/evaluate',
+        'method': 'POST',
+        'needs_overlay_id': True
+    },
     ('iou_eval', 'done'): {
         'next_step': 'ad_copy_gen_kor',
         'api_endpoint': '/api/yh/gpt/eng-to-kor',
@@ -282,23 +321,36 @@ async def trigger_next_pipeline_stage_for_variant(
     tenant_id: str,
     img_asset_id: str
 ):
-    """다음 파이프라인 단계 트리거"""
+    """다음 파이프라인 단계 트리거 (job_variants_id 기반)"""
     
-    # 1. 트리거 조건 확인
-    if not current_step or status != 'done':
+    # 트리거 조건 확인: done 또는 queued 상태 허용
+    # queued 상태는 현재 단계를 실행해야 하는 상태
+    if not current_step or status not in ['done', 'queued']:
+        logger.debug(f"트리거 조건 불만족: status={status} (done 또는 queued 필요)")
         return
     
-    # 2. 다음 단계 정보 조회
-    stage_info = PIPELINE_STAGES.get((current_step, status))
+    # queued 상태일 때는 현재 단계를 실행해야 하므로, (current_step, 'done') 매핑을 사용
+    if status == 'queued':
+        stage_info = PIPELINE_STAGES.get((current_step, 'done'))
+        logger.info(f"queued 상태에서 현재 단계 실행: current_step={current_step}")
+    else:
+        stage_info = PIPELINE_STAGES.get((current_step, status))
+    
     if not stage_info:
         return
     
-    # 3. 중복 실행 방지: 상태 재확인
-    if not await _verify_job_variant_state(job_variants_id, current_step, status, tenant_id):
+    # Job 레벨 단계인 경우 variant 레벨 트리거에서 스킵
+    if stage_info.get('is_job_level', False):
+        await _check_and_trigger_job_level_stage(job_id, current_step, status, tenant_id, stage_info)
+        return
+    
+    # 중복 실행 방지: 상태 재확인
+    verify_status = status if status == 'queued' else status
+    if not await _verify_job_variant_state(job_variants_id, current_step, verify_status, tenant_id):
         logger.info(f"Job Variant 상태가 변경되어 스킵: {job_variants_id}")
         return
     
-    # 4. 필요한 데이터 조회
+    # API 호출
     api_url = f"http://{HOST}:{PORT}{stage_info['api_endpoint']}"
     request_data = {
         'job_variants_id': job_variants_id,
@@ -312,26 +364,30 @@ async def trigger_next_pipeline_stage_for_variant(
         if overlay_id:
             request_data['overlay_id'] = overlay_id
     
-    # 5. API 호출
+    # text와 proposal_id가 필요한 경우 조회 (overlay 단계)
+    if stage_info.get('needs_text_and_proposal', False):
+        text_and_proposal = await _get_text_and_proposal_from_job_variant(job_variants_id, job_id, tenant_id)
+        if text_and_proposal:
+            request_data['text'] = text_and_proposal['text']
+            if text_and_proposal.get('proposal_id'):
+                request_data['proposal_id'] = text_and_proposal['proposal_id']
+    
+    # API 호출
     try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with httpx.AsyncClient(timeout=1800.0) as client:  # 30분 타임아웃
             response = await client.post(api_url, json=request_data)
             response.raise_for_status()
-            logger.info(
-                f"[TRIGGER] 파이프라인 단계 트리거 성공: "
-                f"job_variants_id={job_variants_id}, next_step={stage_info['next_step']}"
-            )
+            logger.info(f"파이프라인 단계 실행 성공: next_step={stage_info['next_step']}")
     except httpx.HTTPError as e:
         logger.error(f"파이프라인 단계 실행 실패: {e}")
-        await _update_variant_status(job_variants_id, 'failed')
-        raise
 ```
 
 **핵심 포인트**:
-- 단계 매핑 테이블: 딕셔너리 기반 단계 결정
-- 중복 실행 방지: 상태 재확인으로 안전성 보장
-- 필요한 데이터 자동 조회: overlay_id, text, proposal_id 등
-- 에러 처리: 실패 시 variant 상태를 'failed'로 업데이트
+- **queued 상태 지원**: `vlm_analyze, queued` 상태도 트리거 가능
+- **단계 매핑 테이블**: 딕셔너리 기반 단계 결정
+- **중복 실행 방지**: 상태 재확인으로 안전성 보장
+- **필요한 데이터 자동 조회**: overlay_id, text, proposal_id 등
+- **Job 레벨 단계 처리**: 모든 variants 완료 후 Job 레벨 단계 실행
 
 ---
 
@@ -340,31 +396,52 @@ async def trigger_next_pipeline_stage_for_variant(
 **파일**: `main.py`
 
 ```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from config import PART_NAME, HOST, PORT, ENABLE_JOB_STATE_LISTENER
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """애플리케이션 생명주기 관리"""
     # Startup
+    print("=" * 60)
+    print("애플리케이션 시작 중...")
     logger.info("애플리케이션 시작 중...")
     
     if ENABLE_JOB_STATE_LISTENER:
-        from services.job_state_listener import start_listener
-        logger.info("Job State Listener 시작...")
-        await start_listener()
-        logger.info("✓ Job State Listener 시작 완료")
+        print(f"ENABLE_JOB_STATE_LISTENER: {ENABLE_JOB_STATE_LISTENER}")
+        try:
+            from services.job_state_listener import start_listener
+            print("Job State Listener 시작...")
+            logger.info("Job State Listener 시작...")
+            await start_listener()
+            print("✓ Job State Listener 시작 완료")
+        except Exception as e:
+            print(f"❌ Job State Listener 시작 실패: {e}")
+            logger.error(f"Job State Listener 시작 실패: {e}", exc_info=True)
+    else:
+        print("Job State Listener 비활성화됨")
     
     yield
     
     # Shutdown
+    print("애플리케이션 종료 중...")
     logger.info("애플리케이션 종료 중...")
     
     if ENABLE_JOB_STATE_LISTENER:
-        from services.job_state_listener import stop_listener
-        logger.info("Job State Listener 종료...")
-        await stop_listener()
+        try:
+            from services.job_state_listener import stop_listener
+            print("Job State Listener 종료...")
+            logger.info("Job State Listener 종료...")
+            await stop_listener()
+        except Exception as e:
+            print(f"❌ Job State Listener 종료 실패: {e}")
+            logger.error(f"Job State Listener 종료 실패: {e}", exc_info=True)
 
 app = FastAPI(
-    title=f"app-{PART_NAME}",
-    lifespan=lifespan  # 생명주기 이벤트 통합
+    title=f"app-{PART_NAME} (Planner/Overlay/Eval)",
+    root_path=ROOT_PATH,
+    lifespan=lifespan
 )
 ```
 
@@ -372,6 +449,7 @@ app = FastAPI(
 - `lifespan`: FastAPI의 생명주기 관리
 - 서버 시작 시 자동 실행
 - 서버 종료 시 정리 작업
+- `ENABLE_JOB_STATE_LISTENER` 환경 변수로 활성화/비활성화 제어
 
 ---
 
@@ -554,6 +632,7 @@ from sqlalchemy import text
 db = SessionLocal()
 try:
     # img_gen 완료 상태로 업데이트
+    # updated_at도 업데이트하여 트리거 발동 보장
     db.execute(text("""
         UPDATE jobs_variants
         SET status = 'done',
@@ -569,16 +648,68 @@ finally:
     db.close()
 ```
 
+### 예시 2: vlm_analyze, queued 상태로 INSERT 후 UPDATE
+
+```python
+# YE 파트에서 variants 생성 시
+from database import SessionLocal
+from sqlalchemy import text
+
+db = SessionLocal()
+try:
+    # 1. INSERT (초기 상태)
+    db.execute(text("""
+        INSERT INTO jobs_variants (
+            job_variants_id, job_id, img_asset_id, creation_order,
+            status, current_step,
+            created_at, updated_at
+        ) VALUES (
+            :job_variants_id, :job_id, :img_asset_id, :creation_order,
+            'queued', 'vlm_analyze',
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+    """), {
+        "job_variants_id": job_variants_id,
+        "job_id": job_id,
+        "img_asset_id": image_asset_id,
+        "creation_order": creation_order
+    })
+    
+    # 2. UPDATE (updated_at 변경하여 트리거 발동)
+    db.execute(text("""
+        UPDATE jobs_variants
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE job_variants_id = :job_variants_id
+    """), {"job_variants_id": job_variants_id})
+    db.commit()
+    
+    # 자동으로 vlm_analyze (LLaVA Stage 1)가 실행됩니다!
+    print("✅ vlm_analyze, queued 상태로 설정, 자동으로 다음 단계 진행됩니다")
+finally:
+    db.close()
+```
+
 ---
 
-### 예시 2: 전체 파이프라인 자동 실행
+### 예시 3: 전체 파이프라인 자동 실행
 
 ```python
 # Job 생성 후 자동으로 전체 파이프라인 진행
-# 1. Job 및 Variants 생성 (user_img_input done 상태)
-# 2. YE 파트가 img_gen 완료 → 자동 트리거
-# 3. vlm_analyze → yolo_detect → ... → instagram_feed_gen
-# 4. 모든 단계가 자동으로 진행됩니다!
+# 1. Job 및 Variants 생성 (vlm_analyze, queued 상태)
+# 2. updated_at 업데이트로 트리거 발동
+# 3. vlm_analyze → yolo_detect → planner → overlay → vlm_judge → ocr_eval → readability_eval → iou_eval
+# 4. 모든 variants 완료 후 ad_copy_gen_kor → instagram_feed_gen
+# 5. 모든 단계가 자동으로 진행됩니다!
+```
+
+### 예시 4: 모니터링 스크립트 사용
+
+```bash
+# Job 모니터링
+python scripts/monitor_job_pipeline.py <job_id>
+
+# 파이프라인 결과 분석
+python scripts/analyze_pipeline_results.py --job-id <job_id>
 ```
 
 ---

@@ -67,7 +67,81 @@ Job 자동 생성
 
 ## 💻 구현 코드
 
-### 1. 전체 파이프라인 테스트
+### 1. Job Pipeline 모니터링 상세
+
+**파일**: `scripts/monitor_job_pipeline.py`
+
+```python
+def monitor_job(job_id: str, max_iterations: int = 120, check_interval: int = 10):
+    """
+    Job의 진행 상황을 모니터링합니다.
+    
+    Args:
+        job_id: 모니터링할 Job ID
+        max_iterations: 최대 반복 횟수 (기본값: 120, 약 20분)
+        check_interval: 확인 간격 (초, 기본값: 10초)
+    """
+    # Job 및 Variants 상태 확인
+    # Planner 이미지 경로 조회
+    # 최종 오버레이 이미지 경로 조회
+    # GPT 광고문구 조회
+    # Instagram Feed 정보 조회
+    # 리스너 및 트리거 상태 확인
+```
+
+**사용 예시**:
+```bash
+# Job 모니터링
+python scripts/monitor_job_pipeline.py <job_id> [max_iterations] [check_interval]
+
+# 예시
+python scripts/monitor_job_pipeline.py cc6b3fb9-ef53-42c2-a811-fbd10d43e6f2
+```
+
+**주요 기능**:
+- 실시간 Job 및 Variants 상태 모니터링
+- Planner 이미지 절대 경로 출력
+- 최종 오버레이 이미지 절대 경로 출력
+- GPT 광고문구 출력
+- Instagram Feed 글 및 해시태그 출력
+- 리스너 및 트리거 상태 확인 안내
+
+---
+
+### 2. 파이프라인 결과 분석
+
+**파일**: `scripts/analyze_pipeline_results.py`
+
+```python
+def analyze_job(job_id: str, db: SessionLocal):
+    """Job ID를 기반으로 결과 분석"""
+    # Job 정보
+    # Variants 정보
+    # Overlay Layout 정보
+    # Planner Proposal 정보
+    # 평가 결과 (OCR, Readability, IoU, VLM Judge)
+    # 최종 이미지 경로
+```
+
+**사용 예시**:
+```bash
+# Job 분석
+python scripts/analyze_pipeline_results.py --job-id <job_id>
+
+# Tenant 분석 (최근 Job들)
+python scripts/analyze_pipeline_results.py --tenant-id <tenant_id> --limit 5
+```
+
+**주요 기능**:
+- Job 및 Variants 상세 정보 분석
+- Overlay Layout 및 텍스트 분석
+- Planner Proposal 선택 분석
+- 평가 결과 상세 분석
+- 최종 이미지 경로 확인
+
+---
+
+### 3. 전체 파이프라인 테스트
 
 **파일**: `scripts/background_pipeline_with_text_generation.py`
 

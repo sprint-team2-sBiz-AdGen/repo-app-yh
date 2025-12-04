@@ -6,15 +6,16 @@
 - **`00_PROJECT_OVERVIEW.md`**: 전체 프로젝트 개요 및 발표 슬라이드 (24개 슬라이드)
 
 ### 상세 기능별 자료
-1. **`01_AUTOMATION_TRIGGER_SYSTEM.md`**: 자동화 및 트리거 시스템
-2. **`02-1_LLAVA_INTEGRATION.md`**: LLaVA 통합 (양자화, Thread-safe 상세)
-3. **`02-2_YOLO_INTEGRATION.md`**: YOLO 통합
-4. **`02-3_GPT_INTEGRATION.md`**: GPT 통합
-5. **`03_IMAGE_PROCESSING_OVERLAY.md`**: 이미지 처리 및 오버레이
-6. **`04_QUALITY_EVALUATION_SYSTEM.md`**: 품질 평가 시스템
-7. **`05_TEXT_GENERATION_TRANSLATION.md`**: 텍스트 생성 및 변환
-8. **`06_MONITORING_TRANSLATION.md`**: 모니터링 및 추적
-9. **`07_TEST_DEVELOPMENT_TOOLS.md`**: 테스트 및 개발 도구
+1. **`01_AUTOMATION_TRIGGER_SYSTEM.md`**: 자동화 및 트리거 시스템 (PostgreSQL LISTEN/NOTIFY, queued 상태 처리)
+2. **`02_AI_MODEL_INTEGRATION.md`**: AI 모델 통합 개요
+3. **`02-1_LLAVA_INTEGRATION.md`**: LLaVA 통합 (양자화, Thread-safe 상세)
+4. **`02-2_YOLO_INTEGRATION.md`**: YOLO 통합
+5. **`02-3_GPT_INTEGRATION.md`**: GPT 통합
+6. **`03_IMAGE_PROCESSING_OVERLAY.md`**: 이미지 처리 및 오버레이
+7. **`04_QUALITY_EVALUATION_SYSTEM.md`**: 품질 평가 시스템
+8. **`05_TEXT_GENERATION_TRANSLATION.md`**: 텍스트 생성 및 변환
+9. **`06_MONITORING_TRACING.md`**: 모니터링 및 추적
+10. **`07_TEST_DEVELOPMENT_TOOLS.md`**: 테스트 및 개발 도구 (monitor_job_pipeline.py, analyze_pipeline_results.py)
 
 ### 참고 자료
 - **`PROJECT_FEATURES_FOR_PRESENTATION.md`**: 기능 리스트 및 개요
@@ -105,5 +106,6 @@
 **작성일**: 2025-12-02  
 **작성자**: LEEYH205  
 **버전**: 1.0.0
+
 
 
